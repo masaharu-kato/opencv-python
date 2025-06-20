@@ -5,7 +5,7 @@ from torchvision import transforms
 from PIL import Image
 
 class RelativeImagePairDataset(Dataset):
-    def __init__(self, rootdir: Path | str, imgsize: tuple[int, int]):
+    def __init__(self, rootdir: Path | str, imgsize: tuple[int, int], use_cj: bool):
         self.rootdir = Path(rootdir)
         self.imgsize = imgsize
         self.pairs: list[tuple[Path, Path]] = [] # (degraded_path, clean_path) のタプルを格納
@@ -13,6 +13,7 @@ class RelativeImagePairDataset(Dataset):
         # データ拡張（ランダムクロップ、フリップなど）
         # 学習時に適用することで、モデルの汎化能力を高めます
         self.transform = transforms.Compose([
+            *([transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2)] if use_cj else []),
             transforms.Resize(imgsize), # Resize
             transforms.ToTensor(), # PIL Image to Tensor (0-1 range)
         ])

@@ -238,7 +238,7 @@ def train_model(args):
     model = UNet(in_channels=3, out_channels=3, features=features_list, use_se_block=args.use_se_block).to(device)
 
     # データセットの準備
-    full_dataset = RelativeImagePairDataset(args.dataset_dir, (args.image_width, args.image_height))
+    full_dataset = RelativeImagePairDataset(args.dataset_dir, (args.image_width, args.image_height), use_cj=args.use_cj)
 
     # データの分割
     train_size = int(args.train_split * len(full_dataset))
@@ -425,6 +425,8 @@ if __name__ == "__main__":
                         help="UNetの各ステージのチャネル数をカンマ区切りで指定 (例: '64,128,256,512')。")
     parser.add_argument("--use_se_block", action="store_true",
                         help="Squeeze-and-Excitation (SE) Blockを使用する場合、このフラグを設定。")
+    parser.add_argument("--use_cj", action="store_true",
+                        help="use ColorJitter on the dataset")
 
     args = parser.parse_args()
 
