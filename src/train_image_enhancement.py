@@ -2,19 +2,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
-from torch.utils.tensorboard import SummaryWriter
 from torchvision import models # VGGロード用
-import cv2
-import numpy as np
 import os
-import time
 import argparse
+import numpy as np
 from tqdm import tqdm
 from skimage.metrics import peak_signal_noise_ratio as psnr_metric
 from skimage.metrics import structural_similarity as ssim_metric
-import random # データ拡張のシード設定のため
 
 from dataset import RelativeImagePairDataset
 
@@ -37,11 +33,13 @@ class PerceptualLoss(nn.Module):
                 self.feature_extractor.append(layer)
                 current_layer += 1
             elif isinstance(layer, nn.ReLU):
-                self.feature_extractor.append(layer)
+                # inplace=False に変更する (勾配計算に影響を与えないため)
+                self.feature_extractor.append(nn.ReLU(inplace=False))
                 current_layer += 1
             elif isinstance(layer, nn.MaxPool2d):
                 self.feature_extractor.append(layer)
             
+            # feature_layers に達したらループを抜ける
             if current_layer in feature_layers:
                 # 指定された層までを特徴抽出器とする
                 # 勾配計算を無効化し、評価モードにする
@@ -59,22 +57,26 @@ class PerceptualLoss(nn.Module):
         target_image = self.normalize(target_image)
 
         # 各特徴層での損失を計算
-        loss = 0
+        # loss をテンソルで初期化する
+        loss = torch.tensor(0.0, device=pred_image.device) # <<<< ここを修正
+
         x_pred = pred_image
         x_target = target_image
         
         feature_idx = 0
-        for layer in self.feature_extractor:
+        for i, layer in enumerate(self.feature_extractor): # layer を直接使う
             x_pred = layer(x_pred)
             x_target = layer(x_target)
             
-            if feature_idx in self.feature_layers: # 適切な層で損失を計算
-                 loss += self.mse_loss(x_pred, x_target)
-            
-            if isinstance(layer, (nn.Conv2d, nn.ReLU)): # ConvやReLU層の後に特徴抽出層のインデックスをカウント
+            # ConvやReLU層の後に特徴抽出層のインデックスをカウント
+            # MaxPoolは特徴量マップを生成しないのでカウントしない
+            if isinstance(layer, (nn.Conv2d, nn.ReLU)):
                 feature_idx += 1
+                
+            if feature_idx in self.feature_layers: # 適切な層で損失を計算
+                loss += self.mse_loss(x_pred, x_target)
         
-        return loss
+        return loss # これでテンソルが返される
 
 # --- Squeeze-and-Excitation Block (Attention Mechanism) ---
 class SEBlock(nn.Module):
@@ -236,11 +238,7 @@ def train_model(args):
     model = UNet(in_channels=3, out_channels=3, features=features_list, use_se_block=args.use_se_block).to(device)
 
     # データセットの準備
-    # root_dir には、unet_datasets/ のパスを指定します
-    # ここでは、degraded_dir を root_dir として利用し、その下の動画ファイル名を走査します
-    full_dataset = RelativeImagePairDataset(root_dir=args.dataset_dir, # <-- ここを変更
-                                             image_height=args.image_height, 
-                                             image_width=args.image_width)
+    full_dataset = RelativeImagePairDataset(args.dataset_dir, (args.image_width, args.image_height))
 
     # データの分割
     train_size = int(args.train_split * len(full_dataset))
@@ -254,78 +252,154 @@ def train_model(args):
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
     
     # L1 Loss と Perceptual Loss を組み合わせる
-    l1_loss = nn.L1Loss()
+    l1_loss = nn.L1Loss(reduction='none')
     perceptual_loss = PerceptualLoss().to(device) # <-- Perceptual Loss をインスタンス化
 
-    best_val_psnr = 0.0 # 最良のPSNRを記録
+    best_avg_val_l1_loss = 0.0
+    best_val_ssim = -1.0
     
     # 学習ループ
     for epoch in range(args.epochs):
+        
         model.train()
-        running_loss = 0.0
-        for batch_idx, (degraded_images, clean_images) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1} (Train)")):
-            degraded_images = degraded_images.to(device)
-            clean_images = clean_images.to(device)
+        running_l1_loss = 0.0
+        running_perceptual_loss = 0.0
+        running_total_loss = 0.0
+
+        for batch_idx, (input_tensor, clean_tensor, mask_tensor) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1} (Train)")):
+            input_tensor = input_tensor.to(device)
+            clean_tensor = clean_tensor.to(device)
+            mask_tensor = mask_tensor.to(device) # マスクもデバイスへ
 
             optimizer.zero_grad()
-            outputs = model(degraded_images)
+            output_tensor = model(input_tensor)
 
-            # 損失計算: L1 Loss と Perceptual Loss の組み合わせ
-            loss_l1 = l1_loss(outputs, clean_images)
-            loss_perceptual = perceptual_loss(outputs, clean_images)
+            # L1 Loss の計算 with Mask
+            # l1_loss_per_pixel の形状は (N, C, H, W)
+            l1_loss_per_pixel = l1_loss(output_tensor, clean_tensor)
             
-            # 損失の重み付け (ハイパーパラメータ)
-            # 例えば、L1 Loss を重視しつつ、Perceptual Loss で見た目の品質をガイドする
-            total_loss = loss_l1 + args.lp_weight * loss_perceptual # <-- ここで損失を組み合わせる
+            # 各ピクセルの全チャンネルのL1誤差を合計 (または平均) して、マスクの形状に合わせる
+            # 例: (N, 3, H, W) -> (N, 1, H, W)
+            if l1_loss_per_pixel.dim() == 4: # Assuming N C H W
+                # 各ピクセルのRGBチャンネルの平均誤差を取る
+                l1_loss_per_pixel_mean_channels = torch.mean(l1_loss_per_pixel, dim=1, keepdim=True) 
+            else:
+                l1_loss_per_pixel_mean_channels = l1_loss_per_pixel # もし最初から (N, 1, H, W) ならそのまま
 
+            # マスクを適用
+            # mask_tensor は (N, 1, H, W) を想定。l1_loss_per_pixel_mean_channels も (N, 1, H, W)
+            masked_l1_loss = l1_loss_per_pixel_mean_channels * mask_tensor 
+            
+            # 有効なマスクピクセル数で割る (ゼロ除算防止)
+            # torch.sum(mask_tensor) はバッチ内の全マスクピクセルの合計 (0 or 1 の値)
+            num_valid_pixels = torch.sum(mask_tensor) 
+            if num_valid_pixels > 0:
+                loss_l1 = torch.sum(masked_l1_loss) / num_valid_pixels
+            else:
+                loss_l1 = torch.tensor(0.0).to(device) # 全てマスクされている場合は損失0
+
+            # Perceptual Loss の計算 (マスクは適用しない、画像全体で計算)
+            # モデルの出力とクリーン画像を直接渡す
+            loss_perceptual = perceptual_loss(output_tensor, clean_tensor) 
+
+            total_loss = loss_l1 + args.lp_weight * loss_perceptual
+            
             total_loss.backward()
             optimizer.step()
 
-            running_loss += total_loss.item()
-        
-        avg_train_loss = running_loss / len(train_loader)
+            running_l1_loss += loss_l1.item()
+            running_perceptual_loss += loss_perceptual.item()
+            running_total_loss += total_loss.item()
+
+        avg_l1_loss = running_l1_loss / len(train_loader)
+        avg_perceptual_loss = running_perceptual_loss / len(train_loader)
+        avg_total_loss = running_total_loss / len(train_loader)
+        print(f"Epoch [{epoch+1}/{args.epochs}] Average Train Loss: L1={avg_l1_loss:.4f}, Perceptual={avg_perceptual_loss:.4f}, Total={avg_total_loss:.4f}")
+
 
         # バリデーション
         model.eval()
-        val_psnr = 0.0
-        val_ssim = 0.0
+
+        val_running_l1_loss = 0.0
+        val_running_perceptual_loss = 0.0
+        val_running_total_loss = 0.0
+        val_ssim_scores = [] # SSIMスコアを格納するリスト
+
         with torch.no_grad():
-            for batch_idx, (degraded_images, clean_images) in enumerate(tqdm(val_loader, desc=f"Epoch {epoch+1} (Val)")):
-                degraded_images = degraded_images.to(device)
-                clean_images = clean_images.to(device)
+            for batch_idx, (input_tensor, clean_tensor, mask_tensor) in enumerate(tqdm(val_loader, desc=f"Epoch {epoch+1} (Val)")):
+                input_tensor = input_tensor.to(device)
+                clean_tensor = clean_tensor.to(device)
+                mask_tensor = mask_tensor.to(device) # マスクもデバイスへ
 
-                outputs = model(degraded_images)
+                output_tensor = model(input_tensor)
 
-                # PSNRとSSIMの計算（既存のコードと同じ）
-                for i in range(outputs.shape[0]):
-                    output_np = outputs[i].cpu().numpy().transpose(1, 2, 0)
-                    clean_np = clean_images[i].cpu().numpy().transpose(1, 2, 0)
+                # L1 Loss の計算 with Mask (訓練時と同じロジック)
+                l1_loss_per_pixel = l1_loss(output_tensor, clean_tensor)
+                if l1_loss_per_pixel.dim() == 4:
+                    l1_loss_per_pixel_mean_channels = torch.mean(l1_loss_per_pixel, dim=1, keepdim=True) 
+                else:
+                    l1_loss_per_pixel_mean_channels = l1_loss_per_pixel
+
+                masked_l1_loss = l1_loss_per_pixel_mean_channels * mask_tensor 
+                
+                num_valid_pixels = torch.sum(mask_tensor)
+                if num_valid_pixels > 0:
+                    loss_l1 = torch.sum(masked_l1_loss) / num_valid_pixels
+                else:
+                    loss_l1 = torch.tensor(0.0).to(device)
+
+                # Perceptual Loss の計算 (訓練時と同じロジック)
+                loss_perceptual = perceptual_loss(output_tensor, clean_tensor) 
+
+                total_loss = loss_l1 + args.lp_weight * loss_perceptual
+
+                val_running_l1_loss += loss_l1.item()
+                val_running_perceptual_loss += loss_perceptual.item()
+                val_running_total_loss += total_loss.item()
+                
+                # --- SSIM 計算 ---
+                # PyTorchテンソル (N, C, H, W) から NumPy配列 (H, W, C) に変換し、0-255スケールに戻す
+                for i in range(input_tensor.shape[0]): # バッチ内の各画像に対して
+                    output_img = (output_tensor[i].detach().cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+                    clean_img = (clean_tensor[i].detach().cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
                     
-                    # PSNRとSSIMは0-1範囲で計算されることを前提
-                    val_psnr += psnr_metric(output_np, clean_np, data_range=1)
-                    val_ssim += ssim_metric(output_np, clean_np, data_range=1, channel_axis=-1) # type: ignore
+                    # RGBAのAチャンネルはSSIM計算では使わないので、RGB部分を渡す
+                    # mask_alpha = (mask_tensor[i].detach().cpu().squeeze().numpy() * 255).astype(np.uint8)
+                    
+                    # channel_axis=2 は (H, W, C) 形式の場合に指定
+                    # data_range は画像の最大値-最小値
+                    # win_size はSSIM計算のウィンドウサイズ。通常は7x7や11x11
+                    current_ssim = ssim_metric(output_img, clean_img, data_range=255, channel_axis=2, win_size=11)
+                    val_ssim_scores.append(current_ssim)
 
-                    # print(f"Output NP dtype: {output_np.dtype}, Min: {output_np.min()}, Max: {output_np.max()}")
-                    # print(f"Clean NP dtype: {clean_np.dtype}, Min: {clean_np.min()}, Max: {clean_np.max()}")
-        
-        val_psnr /= len(val_loader.dataset) # type: ignore
-        val_ssim /= len(val_loader.dataset) # type: ignore
 
-        print(f"Epoch {epoch+1} 終了 - Train Loss: {avg_train_loss:.4f}, Val PSNR: {val_psnr:.2f} dB, Val SSIM: {val_ssim:.4f}")
+        avg_val_l1_loss = val_running_l1_loss / len(val_loader)
+        avg_val_perceptual_loss = val_running_perceptual_loss / len(val_loader)
+        avg_val_total_loss = val_running_total_loss / len(val_loader)
+        avg_val_ssim = np.mean(val_ssim_scores) if val_ssim_scores else 0.0
+        print(f"Epoch [{epoch+1}/{args.epochs}] Validation Loss: L1={avg_val_l1_loss:.4f}, Perceptual={avg_val_perceptual_loss:.4f}, Total={avg_val_total_loss:.4f}, SSIM={avg_val_ssim:.4f}")
 
-        # モデルの保存 (PSNRが改善した場合)
-        if val_psnr > best_val_psnr:
-            best_val_psnr = val_psnr
-            model_save_path = f"{args.model_save_dir}/best_unet_model_psnr_{best_val_psnr:.2f}.pth"
+        # Save model if L1 Loss and/or SSIM are improved
+        f_save = False
+        if avg_val_l1_loss < best_avg_val_l1_loss:
+            best_avg_val_l1_loss = avg_val_l1_loss
+            f_save = True
+
+        if avg_val_ssim > best_val_ssim:
+            best_val_ssim = avg_val_ssim
+            f_save = True
+
+        if f_save:
+            model_save_path = f"{args.model_save_dir}/best_unet_model_l1loss_{avg_val_l1_loss:.2f}_ssim_{avg_val_ssim:.2f}.pth"
             os.makedirs(args.model_save_dir, exist_ok=True)
             torch.save(model.state_dict(), model_save_path)
-            print(f"ベストモデルを保存しました: {model_save_path}")
+            print(f"Best model saved to {model_save_path}")
 
 
 # --- コマンドライン引数パーサー ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="画像画質向上モデル (UNet) の強化版学習スクリプト。")
-    parser.add_argument("dataset_dir", type=str,
+    parser.add_argument("dataset_dir", type=str, 
                         help="データセットディレクトリ（動画ごとのファイル名のサブディレクトリを含む）")
     parser.add_argument("model_save_dir", type=str,
                         help="モデルの保存先ディレクトリ")
