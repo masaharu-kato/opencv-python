@@ -200,7 +200,7 @@ def apply_model(model_path, input_dir, output_dir, image_height, image_width, fe
         input_image_rgb = cv2.cvtColor(input_image_bgr, cv2.COLOR_BGR2RGB)
         
         input_image_pil = Image.fromarray(input_image_rgb)
-        input_tensor = transform(input_image_pil).unsqueeze(0).to(device)
+        input_tensor = transform(input_image_pil).unsqueeze(0).to(device) # type: ignore
 
         with torch.no_grad():
             output_tensor = model(input_tensor)
