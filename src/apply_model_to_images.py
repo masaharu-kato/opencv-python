@@ -225,13 +225,13 @@ if __name__ == "__main__":
                         help="ロードする学習済みモデル (.pth) ファイルのパス。")
     parser.add_argument("input_dir", type=str,
                         help="モデルを適用する入力画像が保存されているディレクトリのパス。")
-    parser.add_argument("--output_dir", type=str, default="res/enhanced_images_advanced",
+    parser.add_argument("output_dir", type=str,
                         help="画質改善された画像を保存するディレクトリのパス。")
-    parser.add_argument("--image_height", type=int, default=256,
+    parser.add_argument("--image_height", type=int, required=True,
                         help="モデルへの入力画像高さ (学習時と同じ高さ)。")
-    parser.add_argument("--image_width", type=int, default=256,
+    parser.add_argument("--image_width", type=int, required=True,
                         help="モデルへの入力画像幅 (学習時と同じ幅)。")
-    parser.add_argument("--features", type=str, default="64,128,256,512",
+    parser.add_argument("--features", type=str, required=True,
                         help="UNetの各ステージのチャネル数をカンマ区切りで指定 (例: '64,128,256,512')。")
     parser.add_argument("--use_se_block", action="store_true",
                         help="Squeeze-and-Excitation (SE) Blockを使用した場合、このフラグを設定。")
