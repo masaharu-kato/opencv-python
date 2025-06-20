@@ -11,6 +11,8 @@ import numpy as np
 from tqdm import tqdm
 from skimage.metrics import peak_signal_noise_ratio as psnr_metric
 from skimage.metrics import structural_similarity as ssim_metric
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+import pytorch_optimizer
 
 from dataset import RelativeImagePairDataset
 
@@ -315,7 +317,16 @@ def train_model(args):
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
     # 最適化手法と損失関数の定義
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+    optimizer = pytorch_optimizer.RAdam(model.parameters(), lr=args.learning_rate)
+
+    # スケジューラーの定義
+    # monitor='avg_val_ssim' : 監視するメトリクス (validate_modelから返されるSSIMの平均)
+    # mode='max' : SSIMは大きい方が良いので 'max'
+    # factor=0.5 : 学習率を0.5倍にする
+    # patience : nエポック改善しなかったら学習率を減衰
+    # threshold=0.0001 : 改善とみなす最小の差分 (例: SSIMが0.0001以上増えたら改善)
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3, threshold=0.0001)
+
     
     # L1 Loss と Perceptual Loss を組み合わせる
     l1_loss = nn.L1Loss(reduction='none')
@@ -394,8 +405,6 @@ def train_model(args):
             total_loss.backward()
             optimizer.step()
 
-            running_l1_loss += loss_l1.item()
-            running_perceptual_loss += loss_perceptual.item()
             running_total_loss += total_loss.item()
 
         avg_l1_loss = running_l1_loss / len(train_loader)
@@ -486,6 +495,10 @@ def train_model(args):
         avg_val_hsv_s_loss = val_running_hsv_s_loss / len(val_loader) 
         avg_val_total_loss = val_running_total_loss / len(val_loader)
         avg_val_ssim = np.mean(val_ssim_scores) if val_ssim_scores else 0.0
+        
+        # スケジューラーを更新
+        scheduler.step(avg_val_ssim) # SSIMの値を渡す
+
         print(f"Epoch [{epoch+1}/{args.epochs}] Validation Loss: L1={avg_val_l1_loss:.4f}, Perceptual={avg_val_perceptual_loss:.4f}, HSV_S={avg_val_hsv_s_loss:4f}, Total={avg_val_total_loss:.4f}, SSIM={avg_val_ssim:.4f}")
 
         # Save model if L1 Loss and/or SSIM are improved
