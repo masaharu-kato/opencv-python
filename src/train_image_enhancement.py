@@ -11,7 +11,7 @@ import numpy as np
 from tqdm import tqdm
 from skimage.metrics import peak_signal_noise_ratio as psnr_metric
 from skimage.metrics import structural_similarity as ssim_metric
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 import pytorch_optimizer
 
 from dataset import RelativeImagePairDataset
@@ -320,14 +320,12 @@ def train_model(args):
     optimizer = pytorch_optimizer.RAdam(model.parameters(), lr=args.learning_rate)
 
     # スケジューラーの定義
-    # monitor='avg_val_ssim' : 監視するメトリクス (validate_modelから返されるSSIMの平均)
-    # mode='max' : SSIMは大きい方が良いので 'max'
-    # factor=0.5 : 学習率を0.5倍にする
-    # patience : nエポック改善しなかったら学習率を減衰
-    # threshold=0.0001 : 改善とみなす最小の差分 (例: SSIMが0.0001以上増えたら改善)
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3, threshold=0.0001)
+    # T_0: 最初の周期の長さ（エポック数）
+    # T_mult: 各周期の長さを次の周期でどれだけ伸ばすか（1にすると周期長は一定）
+    # eta_min: 学習率の最小値
+    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=1, eta_min=1e-6) # 例としてT_0=10 (10エポックで学習率をリセット)
 
-    
+        
     # L1 Loss と Perceptual Loss を組み合わせる
     l1_loss = nn.L1Loss(reduction='none')
     perceptual_loss = PerceptualLoss().to(device) # <-- Perceptual Loss をインスタンス化
@@ -406,6 +404,9 @@ def train_model(args):
             optimizer.step()
 
             running_total_loss += total_loss.item()
+
+            # スケジューラーを更新 (Optimizer.step() の直後が一般的)
+            scheduler.step(args.epochs + batch_idx / len(train_loader)) # 現在のエポック進捗を渡す
 
         avg_l1_loss = running_l1_loss / len(train_loader)
         avg_perceptual_loss = running_perceptual_loss / len(train_loader)
@@ -495,9 +496,6 @@ def train_model(args):
         avg_val_hsv_s_loss = val_running_hsv_s_loss / len(val_loader) 
         avg_val_total_loss = val_running_total_loss / len(val_loader)
         avg_val_ssim = np.mean(val_ssim_scores) if val_ssim_scores else 0.0
-        
-        # スケジューラーを更新
-        scheduler.step(avg_val_ssim) # SSIMの値を渡す
 
         print(f"Epoch [{epoch+1}/{args.epochs}] Validation Loss: L1={avg_val_l1_loss:.4f}, Perceptual={avg_val_perceptual_loss:.4f}, HSV_S={avg_val_hsv_s_loss:4f}, Total={avg_val_total_loss:.4f}, SSIM={avg_val_ssim:.4f}")
 
