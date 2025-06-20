@@ -14,6 +14,72 @@ from skimage.metrics import structural_similarity as ssim_metric
 
 from dataset import RelativeImagePairDataset
 
+# RGB to HSV conversion (PyTorch version)
+# Input: Tensor of shape (N, 3, H, W) in RGB format, range [0, 1]
+# Output: Tensor of shape (N, 3, H, W) in HSV format, H:[0,1], S:[0,1], V:[0,1]
+def rgb_to_hsv(image: torch.Tensor) -> torch.Tensor:
+    if not isinstance(image, torch.Tensor):
+        raise TypeError(f"Input type is not a torch.Tensor. Got {type(image)}")
+
+    if len(image.shape) < 3 or image.shape[-3] != 3:
+        raise ValueError(f"Input size must have a shape of (* , 3, H, W). Got {image.shape}")
+
+    # Ensure the image is in [0, 1] range for conversion
+    # Assume image is already in [0,1] as it comes from ToTensor()
+    
+    _R: torch.Tensor = image[..., 0, :, :]
+    _G: torch.Tensor = image[..., 1, :, :]
+    _B: torch.Tensor = image[..., 2, :, :]
+
+    maxc: torch.Tensor = image.max(dim=-3)[0]
+    minc: torch.Tensor = image.min(dim=-3)[0]
+
+    H: torch.Tensor = torch.zeros_like(maxc)
+    
+    delta: torch.Tensor = maxc - minc
+    
+    # Check if delta is zero to avoid division by zero later
+    # This also handles gray pixels where H is undefined but typically set to 0
+    mask_maxc_eq_minc = (delta == 0)
+
+    # Hue calculation
+    # For R
+    mask_r = (_R == maxc) & ~mask_maxc_eq_minc
+    H[mask_r] = (_G[mask_r] - _B[mask_r]) / delta[mask_r]
+
+    # For G
+    mask_g = (_G == maxc) & ~mask_maxc_eq_minc
+    H[mask_g] = 2.0 + (_B[mask_g] - _R[mask_g]) / delta[mask_g]
+
+    # For B
+    mask_b = (_B == maxc) & ~mask_maxc_eq_minc
+    H[mask_b] = 4.0 + (_R[mask_b] - _G[mask_b]) / delta[mask_b]
+
+    H = H / 6.0  # Normalize H to [0, 1]
+    H[H < 0] += 1.0 # Handle negative Hue values
+
+    # Saturation calculation
+    S: torch.Tensor = torch.zeros_like(maxc)
+    # Check if maxc is zero to avoid division by zero
+    mask_maxc_nz = (maxc != 0)
+    S[mask_maxc_nz] = delta[mask_maxc_nz] / maxc[mask_maxc_nz]
+
+    # Value calculation (V is just maxc)
+    V: torch.Tensor = maxc
+
+    return torch.stack([H, S, V], dim=-3)
+
+# ----------------------------------------------------
+# OR, for Lab conversion (more complex, typically use kornia)
+# If you want Lab, it's recommended to use kornia library:
+# pip install kornia
+# import kornia.color as kc
+# 
+# def rgb_to_lab(image: torch.Tensor) -> torch.Tensor:
+#     # Ensure image is float and in [0, 1] range
+#     return kc.rgb_to_lab(image)
+# ----------------------------------------------------
+
 # Perceptual Loss (VGG Loss) の定義
 class PerceptualLoss(nn.Module):
     def __init__(self, feature_layers=[2, 7, 16, 25, 34]): # VGG19のrelu1_1, relu2_1, relu3_1, relu4_1, relu5_1
@@ -264,6 +330,7 @@ def train_model(args):
         model.train()
         running_l1_loss = 0.0
         running_perceptual_loss = 0.0
+        running_hsv_s_loss = 0.0
         running_total_loss = 0.0
 
         for batch_idx, (input_tensor, clean_tensor, mask_tensor) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1} (Train)")):
@@ -298,11 +365,31 @@ def train_model(args):
             else:
                 loss_l1 = torch.tensor(0.0).to(device) # 全てマスクされている場合は損失0
 
+            total_loss = loss_l1
+            running_l1_loss += loss_l1.item()
+
             # Perceptual Loss の計算 (マスクは適用しない、画像全体で計算)
             # モデルの出力とクリーン画像を直接渡す
-            loss_perceptual = perceptual_loss(output_tensor, clean_tensor) 
+            if args.lp_weight:
+                loss_perceptual = perceptual_loss(output_tensor, clean_tensor)
+                total_loss += args.lp_weight * loss_perceptual
+                running_perceptual_loss += loss_perceptual.item()
 
-            total_loss = loss_l1 + args.lp_weight * loss_perceptual
+            # --- ここから HSV 彩度損失の追加 ---
+            if args.hsv_s_weight:
+                clean_hsv = rgb_to_hsv(clean_tensor)
+                output_hsv = rgb_to_hsv(output_tensor)
+                
+                hsv_s_loss_per_pixel = l1_loss(output_hsv[:, 1:2, :, :], clean_hsv[:, 1:2, :, :])
+                masked_hsv_s_loss = hsv_s_loss_per_pixel * mask_tensor
+                
+                if num_valid_pixels > 0:
+                    loss_hsv_s = torch.sum(masked_hsv_s_loss) / num_valid_pixels
+                else:
+                    loss_hsv_s = torch.tensor(0.0).to(device)
+                # --- HSV 彩度損失の追加ここまで ---
+                total_loss += args.hsv_s_weight * loss_hsv_s
+                running_hsv_s_loss += loss_hsv_s.item()
             
             total_loss.backward()
             optimizer.step()
@@ -313,8 +400,9 @@ def train_model(args):
 
         avg_l1_loss = running_l1_loss / len(train_loader)
         avg_perceptual_loss = running_perceptual_loss / len(train_loader)
+        avg_val_hsv_s_loss = running_hsv_s_loss / len(val_loader)
         avg_total_loss = running_total_loss / len(train_loader)
-        print(f"Epoch [{epoch+1}/{args.epochs}] Average Train Loss: L1={avg_l1_loss:.4f}, Perceptual={avg_perceptual_loss:.4f}, Total={avg_total_loss:.4f}")
+        print(f"Epoch [{epoch+1}/{args.epochs}] Average Train Loss: L1={avg_l1_loss:.4f}, Perceptual={avg_perceptual_loss:.4f}, HSV_S={avg_val_hsv_s_loss:4f}, Total={avg_total_loss:.4f}")
 
 
         # バリデーション
@@ -322,6 +410,7 @@ def train_model(args):
 
         val_running_l1_loss = 0.0
         val_running_perceptual_loss = 0.0
+        val_running_hsv_s_loss = 0.0
         val_running_total_loss = 0.0
         val_ssim_scores = [] # SSIMスコアを格納するリスト
 
@@ -348,13 +437,32 @@ def train_model(args):
                 else:
                     loss_l1 = torch.tensor(0.0).to(device)
 
-                # Perceptual Loss の計算 (訓練時と同じロジック)
-                loss_perceptual = perceptual_loss(output_tensor, clean_tensor) 
-
-                total_loss = loss_l1 + args.lp_weight * loss_perceptual
-
+                total_loss = loss_l1
                 val_running_l1_loss += loss_l1.item()
-                val_running_perceptual_loss += loss_perceptual.item()
+
+                # Perceptual Loss の計算 (訓練時と同じロジック)
+                if args.lp_weight:
+                    loss_perceptual = perceptual_loss(output_tensor, clean_tensor)
+                    total_loss += args.lp_weight * loss_perceptual
+                    val_running_perceptual_loss += loss_perceptual.item()
+
+
+                # HSV 彩度損失
+                if args.hsv_s_weight:
+                    clean_hsv = rgb_to_hsv(clean_tensor)
+                    output_hsv = rgb_to_hsv(output_tensor)
+                    
+                    hsv_s_loss_per_pixel = l1_loss(output_hsv[:, 1:2, :, :], clean_hsv[:, 1:2, :, :])
+                    masked_hsv_s_loss = hsv_s_loss_per_pixel * mask_tensor
+                    
+                    if num_valid_pixels > 0:
+                        loss_hsv_s = torch.sum(masked_hsv_s_loss) / num_valid_pixels
+                    else:
+                        loss_hsv_s = torch.tensor(0.0).to(device)
+                
+                    total_loss += args.hsv_s_weight * loss_hsv_s
+                    val_running_hsv_s_loss += loss_hsv_s.item()
+
                 val_running_total_loss += total_loss.item()
                 
                 # --- SSIM 計算 ---
@@ -375,9 +483,10 @@ def train_model(args):
 
         avg_val_l1_loss = val_running_l1_loss / len(val_loader)
         avg_val_perceptual_loss = val_running_perceptual_loss / len(val_loader)
+        avg_val_hsv_s_loss = val_running_hsv_s_loss / len(val_loader) 
         avg_val_total_loss = val_running_total_loss / len(val_loader)
         avg_val_ssim = np.mean(val_ssim_scores) if val_ssim_scores else 0.0
-        print(f"Epoch [{epoch+1}/{args.epochs}] Validation Loss: L1={avg_val_l1_loss:.4f}, Perceptual={avg_val_perceptual_loss:.4f}, Total={avg_val_total_loss:.4f}, SSIM={avg_val_ssim:.4f}")
+        print(f"Epoch [{epoch+1}/{args.epochs}] Validation Loss: L1={avg_val_l1_loss:.4f}, Perceptual={avg_val_perceptual_loss:.4f}, HSV_S={avg_val_hsv_s_loss:4f}, Total={avg_val_total_loss:.4f}, SSIM={avg_val_ssim:.4f}")
 
         # Save model if L1 Loss and/or SSIM are improved
         f_save = False
@@ -413,8 +522,10 @@ if __name__ == "__main__":
                         help="学習エポック数。")
     parser.add_argument("--learning_rate", type=float, default=0.0001,
                         help="初期学習率。")
-    parser.add_argument("--lp_weight", type=float, default=0.1,
+    parser.add_argument("--lp_weight", type=float, default=1.0,
                         help="lp_weight")
+    parser.add_argument("--hsv_s_weight", type=float, default=1.0,
+                        help="hsv_s_weight")
     parser.add_argument("--train_split", type=float, default=0.9,
                         help="学習データセットの割合。残りは検証データセット。")
     parser.add_argument("--num_workers", type=int, default=(os.cpu_count() or 2) // 2,
