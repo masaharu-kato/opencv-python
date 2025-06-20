@@ -1,73 +1,78 @@
+import sys
 import cv2
 import numpy as np
-import sys
 
-def align_images(image_a_path, image_g_path):
-    # 画像の読み込み (BGR形式で読み込まれる)
-    img_a = cv2.imread(image_a_path)
-    img_g = cv2.imread(image_g_path)
+def align_images_with_optical_flow(image_a_path, image_g_path):
+    # 画像の読み込み
+    img_a_color = cv2.imread(image_a_path)
+    img_g_color = cv2.imread(image_g_path)
 
-    if img_a is None or img_g is None:
+    if img_a_color is None or img_g_color is None:
         print(f"Error: Could not read images {image_a_path} or {image_g_path}")
         return None
+    
+    # アルファチャンネルを追加してRGBAに変換
+    # 初期値として、全て不透明(255)のアルファチャンネルを作成
+    alpha_channel_g = np.full(img_g_color.shape[:2], 255, dtype=np.uint8)
+    img_g_rgba = cv2.merge([img_g_color[:,:,0], img_g_color[:,:,1], img_g_color[:,:,2], alpha_channel_g])
 
-    # グレースケール変換 (特徴点検出のため)
-    img_a_gray = cv2.cvtColor(img_a, cv2.COLOR_BGR2GRAY)
-    img_g_gray = cv2.cvtColor(img_g, cv2.COLOR_BGR2GRAY)
 
-    # 1. 特徴点検出と記述
-    # ORB (Oriented FAST and Rotated BRIEF) は、SIFT/SURFに比べて高速で、特許もフリー
-    orb = cv2.ORB_create(nfeatures=5000) # 検出する特徴点の最大数を増やすと良いかも
+    # オプティカルフローはグレースケール画像で計算するのが一般的
+    img_a_gray = cv2.cvtColor(img_a_color, cv2.COLOR_BGR2GRAY)
+    img_g_gray = cv2.cvtColor(img_g_color, cv2.COLOR_BGR2GRAY)
 
-    kp_a, des_a = orb.detectAndCompute(img_a_gray, None) # キーポイントと記述子
-    kp_g, des_g = orb.detectAndCompute(img_g_gray, None)
+    # Farneback法でオプティカルフローを計算
+    # flow は (高さ, 幅, 2) のNumpy配列で、各ピクセルの (dx, dy) 変位ベクトルを表す
+    # prev: 最初の画像 (img_a_gray)
+    # next: 2番目の画像 (img_g_gray)
+    # pyr_scale: 各画像ピラミッドレベルでスケールを減らす比率 (0.5は半分)
+    # levels: 画像ピラミッドのレベル数
+    # winsize: 各ピクセルが考慮される平均ウィンドウサイズ
+    # iterations: 各ピラミッドレベルでの反復回数
+    # poly_n: 多項式展開の近似サイズ (通常5または7)
+    # poly_sigma: ガウシアンの標準偏差 (poly_n=5なら1.1、poly_n=7なら1.5)
+    # flags: 0, cv2.OPTFLOW_FARNEBACK_GAUSSIAN など
+    flow = cv2.calcOpticalFlowFarneback(prev=img_a_gray, 
+                                        next=img_g_gray, 
+                                        flow=None, 
+                                        pyr_scale=0.5, 
+                                        levels=3, 
+                                        winsize=15, 
+                                        iterations=3, 
+                                        poly_n=5, 
+                                        poly_sigma=1.1, 
+                                        flags=0)
 
-    if des_a is None or des_g is None:
-        print(f"Error: Could not find enough keypoints in {image_a_path} or {image_g_path}")
-        return None
+    # 変位ベクトル場 (flow) からワープ用のマッピング座標を生成
+    # meshgrid で画像の各ピクセル座標を生成
+    h, w = img_a_gray.shape
+    x_coords, y_coords = np.meshgrid(np.arange(w), np.arange(h))
 
-    # 2. 特徴点マッチング
-    # Brute-Force Matcher を使用 (NORM_HAMMING は ORB/BRIEF記述子向け)
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True) # crossCheck=Trueで互いに最適なマッチのみ
+    # 各ピクセルの新しい位置を計算: 元の座標 + 推定された変位 (flow)
+    # flow[:,:,0] はx方向の変位 (dx)、flow[:,:,1] はy方向の変位 (dy)
+    map_x = (x_coords + flow[:,:,0]).astype(np.float32)
+    map_y = (y_coords + flow[:,:,1]).astype(np.float32)
 
-    matches = bf.match(des_a, des_g)
+    # cv2.remap を使って画像をワープ (img_g_color を img_a_color にアライン)
+    # map_x, map_y は、それぞれ出力画像の各ピクセルが、入力画像のどこから値を取ってくるかを示す座標
+    # WARP_INVERSE_MAP は、flow が "destination_pixel = source_pixel + flow" ではなく
+    # "source_pixel = destination_pixel + flow" (逆方向) を表す場合に使うオプションですが、
+    # Farnebackのフローは通常、forward flow (prev -> next) なので、ここでは使いません。
+    # map_x と map_y が「出力ピクセル (x',y') に対応する入力ピクセル (x,y)」を直接示しているため、remapの通常の使い方はこれでOKです。
+    aligned_g_color = cv2.remap(src=img_g_rgba, 
+                                map1=map_x, 
+                                map2=map_y, 
+                                interpolation=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_CONSTANT, # 境界外の色
+                                borderValue=(0, 0, 0, 0)) # (B, G, R, A) = (0, 0, 0, 0)
 
-    # マッチング結果を距離でソート (良いマッチから順に)
-    matches = sorted(matches, key=lambda x: x.distance)
-
-    # 十分な数の良いマッチがあるか確認
-    # アフィン変換には最低3点が必要ですが、RANSACのためにはもっと多い方が良い
-    MIN_MATCH_COUNT = 10 # 経験的に調整が必要
-
-    if len(matches) > MIN_MATCH_COUNT:
-        # 対応点の座標を抽出
-        src_pts = np.float32([kp_a[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
-        dst_pts = np.float32([kp_g[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
-
-        # 3. 外れ値の除去と 4. 変換行列の推定
-        # cv2.estimateAffine2D は RANSAC を内部で実行
-        # estimateAffine2D は2x3行列 M を返す
-        M, mask = cv2.estimateAffine2D(src_pts, dst_pts, method=cv2.RANSAC, ransacReprojThreshold=5.0) 
-        
-        if M is None:
-            print(f"Warning: Could not estimate affine transformation for {image_a_path} and {image_g_path}")
-            return None
-
-        # 5. 画像のワープ (正解画像を基準画像に合わせて変形)
-        # 基準画像のサイズ (height, width)
-        h, w = img_a_gray.shape
-        aligned_g = cv2.warpAffine(img_g, M, (w, h), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP) # WARP_INVERSE_MAPでMの逆変換を適用
-
-        return aligned_g
-    else:
-        print(f"Not enough matches are found for {image_a_path} and {image_g_path} - {len(matches)}/{MIN_MATCH_COUNT}")
-        return None
+    return aligned_g_color
 
 def main():
     input_degraded_image_path = sys.argv[1]
     input_ground_truth_image_path = sys.argv[2]
     output_path = sys.argv[3]
-    output_aligned_g = align_images(input_degraded_image_path, input_ground_truth_image_path)
+    output_aligned_g = align_images_with_optical_flow(input_degraded_image_path, input_ground_truth_image_path)
     if output_aligned_g is not None:
         cv2.imwrite(output_path, output_aligned_g)
 
