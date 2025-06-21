@@ -73,14 +73,21 @@ class UNet(nn.Module):
         self.bottleneck = ResBlock(self.features[-1], self.features[-1] * 2, self.use_se_block, self.use_cbam) # << use_cbamを渡す
 
         # Up part of UNet
+        # --- 変更点: ConvTranspose2d の代わりに Upsample + Conv2d を使用 ---
         for i in range(len(self.features) - 1, -1, -1):
             feature = self.features[i]
+            # 各アップサンプリングステージ用のモジュールをタプルとして追加
             self.ups.append(
-                nn.ConvTranspose2d(
-                    feature * 2, feature, kernel_size=2, stride=2 
+                nn.Sequential(
+                    nn.Upsample(scale_factor=2, mode='nearest'), # 最近傍補間
+                    nn.Conv2d(feature * 2, feature, kernel_size=3, padding=1, bias=False), # 通常の畳み込み
+                    nn.BatchNorm2d(feature),
+                    nn.ReLU(inplace=True)
                 )
             )
-            self.ups.append(ResBlock(feature * 2, feature, self.use_se_block, self.use_cbam)) # << use_cbamを渡す
+            # ResBlockはスキップコネクションとアップサンプリング後の特徴マップを結合した後の処理
+            self.ups.append(ResBlock(feature * 2, feature, self.use_se_block, self.use_cbam)) 
+        # --- 変更ここまで ---
 
         self.final_conv = nn.Sequential(
             nn.Conv2d(self.features[0], out_channels, kernel_size=1),
@@ -102,14 +109,17 @@ class UNet(nn.Module):
 
         # Up path
         for i in range(len(self.ups) // 2):
-            trans_conv = self.ups[i * 2] 
+            # trans_conv は nn.Sequential で定義されたアップサンプリングブロック
+            upsample_block = self.ups[i * 2] 
             res_block = self.ups[i * 2 + 1] 
             
-            x = trans_conv(x)
-            
+            x = upsample_block(x) # 変更点: upsample_block を呼び出す
+
             skip_connection = skip_connections[i]
 
             # サイズが合わない場合の調整 (クロップ)
+            # ConvTranspose2dを使わない場合、このクロップ処理はほとんど不要になるはずですが、
+            # 念のため残しておきます。厳密なサイズ合わせはUpsampleで可能です。
             if x.shape != skip_connection.shape:
                 _, _, H_x, W_x = x.shape
                 _, _, H_skip, W_skip = skip_connection.shape
@@ -125,7 +135,7 @@ class UNet(nn.Module):
                     diff_H = H_x - H_skip
                     diff_W = W_x - W_skip
                     x = x[:, :, diff_H // 2 : H_x - diff_H // 2,
-                                  diff_W // 2 : W_x - diff_W // 2]
+                                     diff_W // 2 : W_x - diff_W // 2]
 
             concat_skip = torch.cat((skip_connection, x), dim=1)
             x = res_block(concat_skip) 
