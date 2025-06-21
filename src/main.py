@@ -9,11 +9,20 @@ from skimage.metrics import peak_signal_noise_ratio as psnr_metric
 from skimage.metrics import structural_similarity as ssim_metric
 # from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 import pytorch_optimizer
+import random
 
 # ローカルモジュールのインポート
 from dataset import RelativeImagePairDataset
 from models.unet import UNet
 import lpips
+
+def set_seed(seed: int):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed) # if using multi-GPU
+    np.random.seed(seed)
+    random.seed(seed)
+    # torch.backends.cudnn.deterministic = True # for reproducibility in CuDNN
+    # torch.backends.cudnn.benchmark = False # for reproducibility in CuDNN
 
 # --- メインの学習関数 ---
 def train_model(args):
@@ -287,7 +296,10 @@ if __name__ == "__main__":
                         help="show train and progress message")
     parser.add_argument("-hm", "--use_hard_mining", action="store_true", # ハードマイニング用フラグ
                         help="ハードマイニングを有効にする場合、このフラグを設定。")
+    parser.add_argument("-rseed", "--random_seed", type=int, required=True,
+                        help="Random seed")
 
     args = parser.parse_args()
 
+    set_seed(args.random_seed)
     train_model(args)
