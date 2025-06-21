@@ -37,7 +37,7 @@ def train_model(args):
     _tqdm = tqdm if verbose else lambda itr, *args, **kwargs: iter(itr)
 
     lp_weight = float(args.lp_weight)
-    # hsv_s_weight は削除
+    hm_temperature = float(args.hm_temperature) if args.hm_temperature else None # Hard-mining temperature parameter
 
     # モデルのインスタンス化
     model = UNet(in_channels=3, out_channels=3, features=features_list, 
@@ -141,6 +141,8 @@ def train_model(args):
             perceptual_losses_batch = torch.zeros_like(current_l1_losses_batch, device=device) # 仮の初期化
             if lp_weight > 0:
                 perceptual_losses_batch = lpips_loss_fn(output_tensor, clean_tensor)
+                if perceptual_losses_batch.dim() > 1:
+                    perceptual_losses_batch = perceptual_losses_batch.squeeze()
                 loss_perceptual = torch.mean(perceptual_losses_batch)
 
             total_loss = loss_l1 + lp_weight * loss_perceptual
@@ -153,7 +155,7 @@ def train_model(args):
             running_total_loss += total_loss.item()
             
             # ハードマイニングのための、現在のバッチの各サンプルのTotal Lossを記録
-            if args.use_hard_mining:
+            if hm_temperature:
                 current_batch_total_losses = current_l1_losses_batch + lp_weight * perceptual_losses_batch
                 
                 # `original_full_dataset_indices` を `train_dataset` 内の相対インデックスに変換
@@ -161,17 +163,14 @@ def train_model(args):
                 for i, full_idx in enumerate(original_full_dataset_indices.cpu().numpy()):
                     # `full_idx_to_subset_idx_map` を使って、full_datasetのインデックスからtrain_dataset内のインデックスを取得
                     subset_idx = full_idx_to_subset_idx_map[full_idx]
-                    current_epoch_train_losses[subset_idx] = current_batch_total_losses[i].item()
+                    current_epoch_train_losses[subset_idx] = current_batch_total_losses[i].squeeze().item()
 
 
         # エポック終了時: サンプリング重みを更新 (ハードマイニングが有効な場合のみ)
-        if args.use_hard_mining:
-            epsilon = 1e-6
-            temperature = 10.0 # 調整可能な「温度」パラメータ
-
+        if hm_temperature:
             # 損失を指数関数的に重み付けし、正規化
             # ここでは損失の指数関数的な増加を使うが、他の方法も検討可能
-            sample_weights = torch.exp(current_epoch_train_losses / temperature)
+            sample_weights = torch.exp(current_epoch_train_losses / hm_temperature)
             sample_weights = sample_weights / sample_weights.sum() # 正規化して確率分布にする
 
             # 新しいサンプラーをDataLoaderに設定
@@ -223,6 +222,8 @@ def train_model(args):
                 loss_perceptual = torch.tensor(0.0).to(device)
                 if lp_weight > 0:
                     perceptual_losses_batch = lpips_loss_fn(output_tensor, clean_tensor)
+                    if perceptual_losses_batch.dim() > 1:
+                        perceptual_losses_batch = perceptual_losses_batch.squeeze()
                     loss_perceptual = torch.mean(perceptual_losses_batch)
 
                 total_loss = loss_l1 + lp_weight * loss_perceptual
@@ -302,8 +303,8 @@ if __name__ == "__main__":
                         help="Convolutional Block Attention Module (CBAM) を使用する場合、このフラグを設定。")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="show train and progress message")
-    parser.add_argument("-hm", "--use_hard_mining", action="store_true", # ハードマイニング用フラグ
-                        help="ハードマイニングを有効にする場合、このフラグを設定。")
+    parser.add_argument("-hmt", "--hm_temperature", type=float,
+                        help="ハードマイニングを有効にする場合, temperatureパラメータを指定")
     parser.add_argument("-rseed", "--random_seed", type=int, required=True,
                         help="Random seed")
 
