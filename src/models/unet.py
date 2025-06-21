@@ -51,10 +51,8 @@ class ResBlock(nn.Module):
 
 # --- UNetモデルの定義 ---
 class UNet(nn.Module):
-    def __init__(self, in_channels=3, out_channels=3, features=None, use_se_block=False, use_cbam=False): # << use_cbam引数を追加
+    def __init__(self, in_channels: int, out_channels: int, features: list[int], use_se_block=False, use_cbam=False): # << use_cbam引数を追加
         super(UNet, self).__init__()
-        if features is None:
-            features = [64, 128, 256, 512]
         self.features = features
         self.use_se_block = use_se_block # 残しておくが、use_cbam=Trueなら無効化される
         self.use_cbam = use_cbam # << CBAMフラグをクラス変数に保存
