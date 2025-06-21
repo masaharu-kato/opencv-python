@@ -15,6 +15,7 @@ import random
 from dataset import RelativeImagePairDataset
 from models.unet import UNet
 import lpips
+import warnings
 
 def set_seed(seed: int):
     torch.manual_seed(seed)
@@ -89,8 +90,9 @@ def train_model(args):
     # net_type は 'alex', 'vgg', 'squeeze' から選択。'alex'が推奨されることが多い。
     # cuda=True でGPUを使用 (デフォルトはFalse)
 
-    _lpips_loss_fn = lpips.LPIPS(net='alex', spatial=False).to(device) # spatial=Falseで通常のLPIPS
-    _lpips_loss_fn.eval()
+    with warnings.catch_warnings(category=UserWarning):
+        _lpips_loss_fn = lpips.LPIPS(net='alex', spatial=False).to(device) # spatial=Falseで通常のLPIPS
+        _lpips_loss_fn.eval()
 
     def lpips_loss_fn(output_tensor, clean_tensor):
         scaled_output = output_tensor * 2.0 - 1.0
