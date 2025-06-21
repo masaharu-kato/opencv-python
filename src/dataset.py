@@ -5,7 +5,7 @@ from torchvision import transforms
 from PIL import Image
 
 class RelativeImagePairDataset(Dataset):
-    def __init__(self, rootdir: Path | str, imgsize: tuple[int, int], use_cj: bool):
+    def __init__(self, rootdir: Path | str, imgsize: tuple[int, int], use_cj=False):
         self.rootdir = Path(rootdir)
         self.imgsize = imgsize
         self.pairs: list[tuple[Path, Path]] = [] # (degraded_path, clean_path) のタプルを格納
@@ -61,4 +61,4 @@ class RelativeImagePairDataset(Dataset):
         gtensor = self.transform(gimg)
         gmasktensor = self.transform(gimg_alpha)
 
-        return btensor, gtensor, gmasktensor
+        return btensor, gtensor, gmasktensor, idx
