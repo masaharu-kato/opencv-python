@@ -13,9 +13,7 @@ import pytorch_optimizer
 # ローカルモジュールのインポート
 from dataset import RelativeImagePairDataset
 from models.unet import UNet
-from losses.perceptual_loss import PerceptualLoss
-# from losses.color_utils import rgb_to_hsv # 削除
-# HsvSLoss クラスも削除
+import lpips
 
 # --- メインの学習関数 ---
 def train_model(args):
@@ -76,7 +74,21 @@ def train_model(args):
         
     # L1 Loss と Perceptual Loss を組み合わせる
     l1_loss_fn = nn.L1Loss(reduction='none') # reduction='none' でピクセルごとのL1誤差を取得
-    perceptual_loss_fn = PerceptualLoss().to(device) # Perceptual Loss をインスタンス化
+    
+    # 'vgg' は通常、Perceptual Lossで使われるVGG-16/19ベース
+    # 'alex' や 'squeeze' も選択可能
+    # net_type は 'alex', 'vgg', 'squeeze' から選択。'alex'が推奨されることが多い。
+    # cuda=True でGPUを使用 (デフォルトはFalse)
+
+    _lpips_loss_fn = lpips.LPIPS(net='alex', spatial=False).to(device) # spatial=Falseで通常のLPIPS
+    _lpips_loss_fn.eval()
+
+    def lpips_loss_fn(output_tensor, clean_tensor):
+        scaled_output = output_tensor * 2.0 - 1.0
+        scaled_clean = clean_tensor * 2.0 - 1.0
+        with warnings.catch_warnings(category=UserWarning):
+            return _lpips_loss_fn(scaled_output, scaled_clean)
+
 
     best_avg_val_total_loss = float('inf')
     prev_avg_val_total_loss = float('inf')
@@ -115,7 +127,7 @@ def train_model(args):
             loss_perceptual = torch.tensor(0.0).to(device)
             perceptual_losses_batch = torch.zeros_like(current_l1_losses_batch, device=device) # 仮の初期化
             if lp_weight > 0:
-                perceptual_losses_batch = perceptual_loss_fn(output_tensor, clean_tensor, reduction='none')
+                perceptual_losses_batch = lpips_loss_fn(output_tensor, clean_tensor)
                 loss_perceptual = torch.mean(perceptual_losses_batch)
 
             total_loss = loss_l1 + lp_weight * loss_perceptual
@@ -197,7 +209,7 @@ def train_model(args):
                 # Perceptual Loss の計算
                 loss_perceptual = torch.tensor(0.0).to(device)
                 if lp_weight > 0:
-                    perceptual_losses_batch = perceptual_loss_fn(output_tensor, clean_tensor, reduction='none')
+                    perceptual_losses_batch = lpips_loss_fn(output_tensor, clean_tensor)
                     loss_perceptual = torch.mean(perceptual_losses_batch)
 
                 total_loss = loss_l1 + lp_weight * loss_perceptual
