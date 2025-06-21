@@ -276,13 +276,13 @@ if __name__ == "__main__":
                         help="データセットディレクトリ（動画ごとのファイル名のサブディレクトリを含む）")
     parser.add_argument("model_save_dir", type=str,
                         help="モデルの保存先ディレクトリ")
-    parser.add_argument("--image_height", type=int, default=192,
+    parser.add_argument("-imgh", "--image_height", type=int, default=192,
                         help="モデルへの入力画像高さ。")
-    parser.add_argument("--image_width", type=int, default=256,
+    parser.add_argument("-imgw", "--image_width", type=int, default=256,
                         help="モデルへの入力画像幅。")
-    parser.add_argument("--batch_size", type=int, default=16,
+    parser.add_argument("-bs", "--batch_size", type=int, default=16,
                         help="学習バッチサイズ。GPUメモリに合わせて調整。")
-    parser.add_argument("--epochs", type=int, default=100,
+    parser.add_argument("-e", "--epochs", type=int, default=100,
                         help="学習エポック数。")
     parser.add_argument("--learning_rate", type=float, default=0.0001,
                         help="初期学習率。")
@@ -294,7 +294,7 @@ if __name__ == "__main__":
                         help="データローダーが使用するワーカースレッド数。")
     parser.add_argument("--no_cuda", action="store_true",
                         help="CUDA (GPU) を使用しない場合、このフラグを設定。")
-    parser.add_argument("--features", type=str, default="64,128,256",
+    parser.add_argument("-ft", "--features", type=str, default="64,128,256",
                         help="UNetの各ステージのチャネル数をカンマ区切りで指定 (例: '64,128,256,512')。")
     parser.add_argument("-seb", "--use_se_block", action="store_true",
                         help="Squeeze-and-Excitation (SE) Blockを使用する場合、このフラグを設定。")
