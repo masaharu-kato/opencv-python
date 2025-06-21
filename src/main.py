@@ -101,6 +101,8 @@ def train_model(args):
 
     best_avg_val_total_loss = float('inf')
     prev_avg_val_total_loss = float('inf')
+    best_avg_val_ssim = 0
+    prev_avg_val_ssim = 0
     
     # 学習ループ
     for epoch in range(args.epochs):
@@ -248,17 +250,21 @@ def train_model(args):
         if avg_val_total_loss < best_avg_val_total_loss:
             best_avg_val_total_loss = avg_val_total_loss
             f_best_improved = True
+        if avg_val_ssim > best_avg_val_ssim:
+            best_avg_val_ssim = avg_val_ssim
+            f_best_improved = True
 
-        f_prev_improved = (avg_val_total_loss < prev_avg_val_total_loss)
+        f_prev_improved = (avg_val_total_loss < prev_avg_val_total_loss) or (avg_val_ssim > prev_avg_val_ssim)
         
-        print(f"Epoch [{epoch+1}/{args.epochs}] {'*' if f_best_improved else '+' if f_prev_improved else '-'} Validation Loss: L1={avg_val_l1_loss:.4f}, Perceptual={avg_val_perceptual_loss:.4f} (w={lp_weight:.4f}), Total={avg_val_total_loss:.4f}, SSIM={avg_val_ssim:.4f}")
+        print(f"Epoch [{epoch+1:4d}/{args.epochs:4d}] {'*' if f_best_improved else '+' if f_prev_improved else '-'} V-Loss: L1={avg_val_l1_loss:.4f}, LPIPS={avg_val_perceptual_loss:.4f}, Total={avg_val_total_loss:.4f}, SSIM={avg_val_ssim:.4f}")
 
         if f_best_improved:
-            model_save_path = f"{args.model_save_dir}/best_unet_model_total_loss_{avg_val_total_loss:.2f}_ssim_{avg_val_ssim:.2f}.pth"
+            model_save_path = f"{args.model_save_dir}/model_{epoch+1:04d}_l1_{avg_val_l1_loss:.2f}_lp_{avg_val_perceptual_loss:.2f}_ssim_{avg_val_ssim:.2f}.pth"
             os.makedirs(args.model_save_dir, exist_ok=True)
             torch.save(model.state_dict(), model_save_path)
 
         prev_avg_val_total_loss = avg_val_total_loss
+        prev_avg_val_ssim = avg_val_ssim
 
 
 # --- コマンドライン引数パーサー ---
