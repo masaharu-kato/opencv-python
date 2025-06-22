@@ -8,6 +8,7 @@ import pytorch_optimizer
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from datetime import datetime
 from torch import Tensor
 from tqdm import tqdm
 from torch.utils.data import DataLoader, random_split, WeightedRandomSampler
@@ -30,16 +31,12 @@ def set_seed(seed: int):
 
 # --- メインの学習関数 ---
 def train_model(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
 
-    # 特徴量リストを文字列から変換
     dataset_dir = str(args.dataset_dir)
     model_save_dir = str(args.model_save_dir)
     in_channels = int(args.in_channels)
     out_channels = int(args.in_channels)
-    image_width = int(args.image_width)
-    image_height = int(args.image_height)
+    in_size = (int(args.image_width), int(args.image_height))
     features = [int(f) for f in args.features.split(',')]
     gan_features = [int(f) for f in args.gan_features.split(',')] if args.gan_features else None
     learning_rate = float(args.learning_rate)
@@ -53,10 +50,30 @@ def train_model(args):
     gan_weight = float(args.gan_weight) if args.gan_weight else None
     use_se_block = bool(args.use_se_block)
     use_cbam = bool(args.use_cbam)
+    log_dir = str(args.log_dir) if args.log_dir else None
     verbose = bool(args.verbose)
+    progress = bool(args.progress)
+
+    log_file_path = os.path.join(log_dir, os.path.basename(model_save_dir) + ".log") if log_dir else None
+    if log_file_path:
+        os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+    log_file = open(log_file_path, mode='a') if log_file_path else None
+
+    def _print(*args, is_verbose=False, to_file=True, to_stdout=True, flush=False):
+        if not is_verbose or verbose:
+            if to_stdout:
+                print(*args, flush=flush)
+            if log_file and to_file:
+                dt = datetime.now().isoformat(sep=' ', timespec='seconds')
+                print(f"{dt}\t", *args, file=log_file, flush=flush)
+
+    _print(args, to_stdout=False)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _print(f"Device: {device}")
     
     # モデルのインスタンス化
-    model = UNet(in_channels=in_channels, out_channels=out_channels, features=features, 
+    model = UNet(in_channels=in_channels, out_channels=out_channels, in_size=in_size, features=features, 
                  use_se_block=use_se_block and not use_cbam,
                  use_cbam=use_cbam).to(device)
     # 最適化手法と損失関数の定義
@@ -73,7 +90,7 @@ def train_model(args):
         optimizer_d = pytorch_optimizer.RAdam(discriminator.parameters(), lr=gan_learning_rate, betas=(0.5, 0.999)) # D用のOptimizer (通常はβ1=0.5)
 
     # データセットの準備
-    full_dataset = RelativeImagePairDataset(dataset_dir, (image_width, image_height))
+    full_dataset = RelativeImagePairDataset(dataset_dir, in_size, 2 ** len(features))
 
     # データの分割
     train_size = int(train_split * len(full_dataset))
@@ -116,16 +133,16 @@ def train_model(args):
     # net_type は 'alex', 'vgg', 'squeeze' から選択。'alex'が推奨されることが多い。
     # cuda=True でGPUを使用 (デフォルトはFalse)
 
-    with warnings.catch_warnings(category=UserWarning):
-        _lpips_loss_fn = lpips.LPIPS(net='alex', spatial=False).to(device) # spatial=Falseで通常のLPIPS
-        _lpips_loss_fn.eval()
+    warnings.simplefilter('ignore', category=UserWarning)
+
+    _lpips_loss_fn = lpips.LPIPS(net='alex', spatial=False).to(device) # spatial=Falseで通常のLPIPS
+    _lpips_loss_fn.eval()
 
     def lpips_loss_fn(scaled_output: Tensor, scaled_clean: Tensor):
-        with warnings.catch_warnings(category=UserWarning):
-            perceptual_losses_batch = _lpips_loss_fn(scaled_output, scaled_clean)
-            if perceptual_losses_batch.dim() > 1: # 先ほど修正した部分
-                perceptual_losses_batch = perceptual_losses_batch.squeeze()
-            return perceptual_losses_batch
+        perceptual_losses_batch = _lpips_loss_fn(scaled_output, scaled_clean)
+        if perceptual_losses_batch.dim() > 1: # 先ほど修正した部分
+            perceptual_losses_batch = perceptual_losses_batch.squeeze()
+        return perceptual_losses_batch
         
     # LSGANの損失関数
     def lsgan_loss(predictions, target_is_real):
@@ -157,7 +174,7 @@ def train_model(args):
 
         # DataLoaderから original_indices_in_subset を受け取る
         # これは train_dataset (Subset) 内でのインデックス
-        for batch_idx, (input_tensor, clean_tensor, mask_tensor, original_full_dataset_indices) in enumerate(tqdm(train_loader, disable=not verbose, desc=f"Epoch {epoch+1} (Train)")):
+        for batch_idx, (input_tensor, clean_tensor, mask_tensor, original_full_dataset_indices) in enumerate(tqdm(train_loader, disable=not progress, desc=f"Epoch {epoch+1} (Train)")):
             input_tensor: Tensor = input_tensor.to(device)
             clean_tensor: Tensor = clean_tensor.to(device)
             mask_tensor: Tensor = mask_tensor.to(device)
@@ -280,8 +297,7 @@ def train_model(args):
         avg_loss_d_fake = val_loss_d_fake / len(train_loader)
         avg_total_loss = val_total_loss / len(train_loader)
         
-        if verbose:
-            print(f"Epoch [{epoch+1:4d}/{epochs:4d}] Average Train Loss: L1={avg_l1_loss:.4f}, LPIPS={avg_perceptual_loss:.4f}, GAN={avg_gan_loss_g:.4f} (dsc={avg_discriminator_loss:.4f},real={avg_loss_d_real:.4f},fake={avg_loss_d_fake:.4f}), Total={avg_total_loss:.4f}")
+        _print(f"Epoch [{epoch+1:4d}/{epochs:4d}] Average Train Loss: L1={avg_l1_loss:.4f}, LPIPS={avg_perceptual_loss:.4f}, GAN={avg_gan_loss_g:.4f} (dsc={avg_discriminator_loss:.4f},real={avg_loss_d_real:.4f},fake={avg_loss_d_fake:.4f}), Total={avg_total_loss:.4f}", is_verbose=True)
 
 
         # バリデーション
@@ -297,7 +313,7 @@ def train_model(args):
         val_ssim_scores = [] 
 
         with torch.no_grad():
-            for batch_idx, (input_tensor, clean_tensor, mask_tensor, _) in enumerate(tqdm(val_loader, disable=not verbose, desc=f"Epoch {epoch+1} (Val)")):
+            for batch_idx, (input_tensor, clean_tensor, mask_tensor, _) in enumerate(tqdm(val_loader, disable=not progress, desc=f"Epoch {epoch+1} (Val)")):
                 input_tensor: Tensor = input_tensor.to(device)
                 clean_tensor: Tensor = clean_tensor.to(device)
                 mask_tensor: Tensor = mask_tensor.to(device)
@@ -398,22 +414,31 @@ def train_model(args):
         f_prev_improved = (avg_total_loss < prev_avg_total_loss) or (avg_ssim > prev_avg_ssim)
         
         logtext = f"Epoch [{epoch+1:4d}/{epochs:4d}]"
-        logtext += '*' if f_best_improved else '+' if f_prev_improved else '-'
+        logtext += f" {'*' if f_best_improved else '+' if f_prev_improved else '-'}"
         logtext += f" V-Loss: L1={avg_l1_loss:.4f}"
         if lp_weight:
             logtext += f", LPIPS={avg_perceptual_loss:.4f}"
         if gan_weight:
             logtext += f", GAN={avg_gan_loss_g:.4f} (dsc={avg_discriminator_loss:.4f},real={avg_loss_d_real:.4f},fake={avg_loss_d_fake:.4f})"
         logtext += f", Total={avg_total_loss:.4f}, SSIM={avg_ssim:.4f}"
-        print(logtext)
+        _print(logtext, flush=True)
 
         if f_best_improved:
-            model_save_path = f"{model_save_dir}/model_{epoch+1:04d}_l1_{avg_l1_loss:.2f}_lp_{avg_perceptual_loss:.2f}_ssim_{avg_ssim:.2f}.pth"
+            model_save_path = f"{model_save_dir}/model_ssim_{avg_ssim:.2f}.pth"
             os.makedirs(name=model_save_dir, exist_ok=True)
-            torch.save(model.state_dict(), model_save_path)
+            model.save(model_save_path, 
+                       args=args,
+                       epoch=epoch,
+                       avg_l1_loss=avg_l1_loss,
+                       avg_perceptual_loss=avg_perceptual_loss,
+                       avg_total_loss=avg_total_loss,
+                       avg_ssim=avg_ssim)
 
         prev_avg_total_loss = avg_total_loss
         prev_avg_ssim = avg_ssim
+
+    if log_file:
+        log_file.close()
 
 
 # --- コマンドライン引数パーサー ---
@@ -459,6 +484,10 @@ if __name__ == "__main__":
                         help="Hard-mining temperature parameter (None to disable)")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="show train and progress message")
+    parser.add_argument("-p", "--progress", action="store_true",
+                        help="show progress bar")
+    parser.add_argument("-log", "--log_dir", type=str, default="log",
+                        help="Log directory (None to disable)")
     parser.add_argument("--no_cuda", action="store_true",
                         help="CUDA (GPU) を使用しない場合、このフラグを設定。")
     parser.add_argument("-rseed", "--random_seed", type=int, required=True,
