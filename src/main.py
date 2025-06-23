@@ -2,6 +2,7 @@ import argparse
 import os
 import random
 import warnings
+from dataclasses import dataclass
 import numpy as np
 import lpips
 import pytorch_optimizer
@@ -16,18 +17,25 @@ from skimage.metrics import peak_signal_noise_ratio as psnr_metric
 from skimage.metrics import structural_similarity as ssim_metric
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
-# ローカルモジュールのインポート
-from dataset import RelativeImagePairDataset
-from models.unet import UNet
-from models.discriminator import Discriminator
+from dataset import Dataset, DatasetOptions
+from models.unet import AttentionMethods, ModelOptions, UNet
+from utils.option_utils import make_options
+@dataclass
+class TrainOptions:
+    seed: int
+    epochs: int
+    train_split: float
+    learning_rate: float
+    batch_size: int
+    ga_steps: int # gradient accumulation steps
+    lp_weight: float
+    hm_temperature: float # Hard mining temperature, 0 for no hard mining
 
-def set_seed(seed: int):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed) # if using multi-GPU
-    np.random.seed(seed)
-    random.seed(seed)
-    # torch.backends.cudnn.deterministic = True # for reproducibility in CuDNN
-    # torch.backends.cudnn.benchmark = False # for reproducibility in CuDNN
+@dataclass
+class RuntimeOptions:
+    num_workers: int
+    verbose: bool
+    no_progress: bool
 
 # --- メインの学習関数 ---
 def train_model(args):
@@ -444,56 +452,25 @@ def train_model(args):
 # --- コマンドライン引数パーサー ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="画像画質向上モデル (UNet) の強化版学習スクリプト。")
-    parser.add_argument("dataset_dir", type=str, 
-                        help="データセットディレクトリ（動画ごとのファイル名のサブディレクトリを含む）")
-    parser.add_argument("model_save_dir", type=str,
-                        help="モデルの保存先ディレクトリ")
-    parser.add_argument("-inchs", "--in_channels", type=int, default=3,
-                        help="Input number of channels")
-    parser.add_argument("-outchs", "--out_channels", type=int, default=3,
-                        help="Output number of channels")
-    parser.add_argument("-imgw", "--image_width", type=int, default=256,
-                        help="Input width")
-    parser.add_argument("-imgh", "--image_height", type=int, default=192,
-                        help="Input height")
-    parser.add_argument("-bs", "--batch_size", type=int, default=16,
-                        help="学習バッチサイズ。GPUメモリに合わせて調整。")
-    parser.add_argument("-e", "--epochs", type=int, default=100,
-                        help="学習エポック数。")
-    parser.add_argument("-lr", "--learning_rate", type=float, default=0.0001,
-                        help="初期学習率。")
-    parser.add_argument("-lp", "--lp_weight", type=float, default=1.0,
-                        help="LPIPS weight")
-    parser.add_argument("-ts", "--train_split", type=float, default=0.9,
-                        help="学習データセットの割合。残りは検証データセット。")
-    parser.add_argument("-nw", "--num_workers", type=int, default=(os.cpu_count() or 2) // 2,
-                        help="データローダーが使用するワーカースレッド数。")
-    parser.add_argument("-ft", "--features", type=str, default="64,128,256",
-                        help="UNetの各ステージのチャネル数をカンマ区切りで指定 (例: '64,128,256,512')。")
-    parser.add_argument("-seb", "--use_se_block", action="store_true",
-                        help="Squeeze-and-Excitation (SE) Blockを使用する場合、このフラグを設定。")
-    parser.add_argument("-cbam", "--use_cbam", action="store_true",
-                        help="Convolutional Block Attention Module (CBAM) を使用する場合、このフラグを設定。")
-    parser.add_argument("-gw", "--gan_weight", type=float, default=None,
-                        help="GAN weight (None to disable)")
-    parser.add_argument("-gft", "--gan_features", type=str, default=None,
-                        help="GAN features (required if --gan_weight is not None)")
-    parser.add_argument("-glr", "--gan_learning_rate", type=float, default=None,
-                        help="GAN learning rate (None to use --learning_rate value)")
-    parser.add_argument("-hmt", "--hm_temperature", type=float, default=None,
-                        help="Hard-mining temperature parameter (None to disable)")
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="show train and progress message")
-    parser.add_argument("-p", "--progress", action="store_true",
-                        help="show progress bar")
-    parser.add_argument("-log", "--log_dir", type=str, default="log",
-                        help="Log directory (None to disable)")
-    parser.add_argument("--no_cuda", action="store_true",
-                        help="CUDA (GPU) を使用しない場合、このフラグを設定。")
-    parser.add_argument("-rseed", "--random_seed", type=int, required=True,
-                        help="Random seed")
+    parser.add_argument("-m" ,"--model_path", type=str, help="Model file path (.pth) to load (continue training)")
+    parser.add_argument("-md" ,"--model_dir", type=str, help="Model save directory (new model will be saved here)")
+    parser.add_argument("-d", "--dataset_dir", type=str, help="データセットディレクトリ（動画ごとのファイル名のサブディレクトリを含む）")
+    parser.add_argument("-imgw", "--input_width", type=int, help="Input image width")
+    parser.add_argument("-imgh", "--input_height", type=int, help="Input image height")
+    parser.add_argument("-bs", "--batch_size", type=int, help="学習バッチサイズ。GPUメモリに合わせて調整。")
+    parser.add_argument("-gas", "--ga_steps", type=int, help="gradient_accumulation_steps")
+    parser.add_argument("-e", "--epochs", type=int, help="学習エポック数。")
+    parser.add_argument("-lr", "--learning_rate", type=float, help="初期学習率。")
+    parser.add_argument("-lp", "--lp_weight", type=float, help="LPIPS weight")
+    parser.add_argument("-ts", "--train_split", type=float, help="学習データセットの割合。残りは検証データセット。")
+    parser.add_argument("-nw", "--num_workers", type=int, default=((cpu_count() or 2) - 1), help="データローダーが使用するワーカースレッド数。")
+    parser.add_argument("-ft", "--features", type=str, help="UNetの各ステージのチャネル数をカンマ区切りで指定 (例: '64,128,256,512')。")
+    parser.add_argument("-at", "--attention_method", choices=list(AttentionMethods.__args__), help="Attention methods to use")
+    parser.add_argument("-hmt", "--hm_temperature", type=float, help="Hard-mining temperature parameter (No hard-mining if 0).")
+    parser.add_argument("-v", "--verbose", action="store_true", help="show train and progress message")
+    parser.add_argument("-nop", "--no_progress", action="store_true", help="hide progress bar")
+    parser.add_argument("-seed", "--seed", type=int, help="Random seed")
 
     args = parser.parse_args()
 
-    set_seed(args.random_seed)
-    train_model(args)
+    train_model(**args.__dict__)

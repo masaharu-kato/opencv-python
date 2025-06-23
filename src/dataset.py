@@ -1,14 +1,17 @@
-# dataset.py (修正版)
+from dataclasses import dataclass
 from pathlib import Path
 from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
 
-class RelativeImagePairDataset(Dataset):
-    def __init__(self, rootdir: Path | str, imgsize: tuple[int, int], use_cj=False):
-        self.rootdir = Path(rootdir)
-        self.imgsize = imgsize
-        self.pairs: list[tuple[Path, Path]] = [] # (degraded_path, clean_path) のタプルを格納
+from models.unet import ModelOptions
+
+@dataclass
+class DatasetOptions:
+    dataset_dir: Path
+    load_all_to_ram: bool = True
+
+
 
         # データ拡張（ランダムクロップ、フリップなど）
         # 学習時に適用することで、モデルの汎化能力を高めます

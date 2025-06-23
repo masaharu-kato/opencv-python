@@ -1,7 +1,9 @@
 from typing import Literal, cast
+from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from models.attention import CABlock, ECABlock, SEBlock, CBAM
+from utils.option_utils import make_options
 
 AttentionMethods = Literal[
     'Identity', # nn.Identity
@@ -10,6 +12,19 @@ AttentionMethods = Literal[
     'ECANet',   # Efficient Channel Attention Network
     'CA'        # Coordinate Attention
 ]
+
+ModelOutputRange = Literal['0_to_1', 'minus1_to_1']
+
+@dataclass
+class ModelOptions:
+    input_width: int
+    input_height: int
+    features: list[int]
+    attention_method: AttentionMethods
+    model_output_range: ModelOutputRange = '0_to_1'
+
+    def input_size(self):
+        return (self.input_height, self.input_width)
 
 
 # --- Residual Block with optional attention method ---
@@ -65,30 +80,29 @@ class ResBlock(nn.Module):
 
 # --- UNetモデルの定義 ---
 class UNet(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, features: list[int], use_se_block=False, use_cbam=False): # << use_cbam引数を追加
+    def __init__(self, opts: ModelOptions):
         super(UNet, self).__init__()
-        self.features = features
-        self.use_se_block = use_se_block # 残しておくが、use_cbam=Trueなら無効化される
-        self.use_cbam = use_cbam # << CBAMフラグをクラス変数に保存
+        self.opts = opts
+        
+        if opts.attention_method not in AttentionMethods.__args__:
+            raise RuntimeError(f'attention_method {opts.attention_method} is not supported.')
+
+        self.input_channels = 3
+        self.output_channels = 3
 
         self.downs = nn.ModuleList()
         self.ups = nn.ModuleList()
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        current_in_channels = in_channels
-        # Down part of UNet
-        for feature in self.features:
-            self.downs.append(ResBlock(current_in_channels, feature, self.use_se_block, self.use_cbam)) # << use_cbamを渡す
+        current_in_channels = self.input_channels
+        for feature in self.opts.features:
+            self.downs.append(ResBlock(current_in_channels, feature, self.opts.attention_method))
             current_in_channels = feature
 
-        # Bottleneck
-        self.bottleneck = ResBlock(self.features[-1], self.features[-1] * 2, self.use_se_block, self.use_cbam) # << use_cbamを渡す
+        self.bottleneck = ResBlock(self.opts.features[-1], self.opts.features[-1] * 2, self.opts.attention_method)
 
-        # Up part of UNet
-        # --- 変更点: ConvTranspose2d の代わりに Upsample + Conv2d を使用 ---
-        for i in range(len(self.features) - 1, -1, -1):
-            feature = self.features[i]
-            # 各アップサンプリングステージ用のモジュールをタプルとして追加
+        for i in range(len(self.opts.features) - 1, -1, -1):
+            feature = self.opts.features[i]
             self.ups.append(
                 nn.Sequential(
                     nn.Upsample(scale_factor=2, mode='nearest'), # 最近傍補間
@@ -97,15 +111,15 @@ class UNet(nn.Module):
                     nn.ReLU(inplace=True)
                 )
             )
-            # ResBlockはスキップコネクションとアップサンプリング後の特徴マップを結合した後の処理
-            self.ups.append(ResBlock(feature * 2, feature, self.use_se_block, self.use_cbam)) 
-        # --- 変更ここまで ---
+            self.ups.append(ResBlock(feature * 2, feature, self.opts.attention_method)) 
 
         self.final_conv = nn.Sequential(
             # padding_mode='reflect' is not needed here as the final conv is 1x1
             nn.Conv2d(self.opts.features[0], self.output_channels, kernel_size=1),
             nn.Sigmoid() 
         )
+        opts.model_output_range = "0_to_1"
+
 
     def forward(self, x):
         skip_connections = []
