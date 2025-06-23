@@ -6,6 +6,7 @@ import warnings
 from dataclasses import dataclass
 import numpy as np
 import lpips
+import piqa
 import pytorch_optimizer
 import torch
 import torch.amp.grad_scaler
@@ -336,6 +337,8 @@ class RuntimeOptions:
                 val_total_loss += total_loss.item()
                 
                 # --- SSIM 計算 ---
+                current_ssim = ssim_metric_piqa(output_tensor, clean_tensor)
+                val_ssim_scores.append(current_ssim.item())
 
                 if batch_idx < 4:
                     writer.add_image('Val_Images/Input', input_tensor[0], epoch)
