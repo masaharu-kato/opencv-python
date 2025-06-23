@@ -8,6 +8,8 @@ import numpy as np
 import lpips
 import pytorch_optimizer
 import torch
+import torch.amp.grad_scaler
+import torch.amp.autocast_mode
 import torch.utils.tensorboard
 import torch.nn as nn
 import torch.nn.functional as F
@@ -82,6 +84,7 @@ class RuntimeOptions:
     logging.info(f"Device: {device}")
 
     logging.info(f"args: {args}")
+    torch.backends.cudnn.benchmark = True
 
     # Write graph to TensorBoard if model is new
     if model_path is None:
@@ -154,9 +157,8 @@ class RuntimeOptions:
     prev_avg_total_loss = float('inf')
     best_avg_ssim = 0
     prev_avg_ssim = 0
-    
-    # 学習ループ
-    for epoch in range(epochs):
+
+    scaler = torch.amp.grad_scaler.GradScaler("cuda")
         model.train()
         val_l1_loss = 0.0
         val_perceptual_loss = 0.0
@@ -176,43 +178,7 @@ class RuntimeOptions:
             clean_tensor: Tensor = clean_tensor.to(device)
             mask_tensor: Tensor = mask_tensor.to(device)
 
-            # ---------------------
-            # 1. Discriminator の学習
-            # ---------------------
-            loss_d: Tensor | None = None
-            if discriminator and optimizer_d:
-                optimizer_d.zero_grad()
-
-                # a. 本物画像に対する損失
-                # Discriminatorの入力は (Generatorの入力画像, ターゲット画像)
-                real_input_d = torch.cat([input_tensor, clean_tensor], dim=1) # 入力画像を条件として結合
-                pred_real = discriminator(real_input_d)
-                loss_d_real = lsgan_loss(pred_real, True)
-
-                # b. 偽画像に対する損失
-                # Generatorからの出力を使用 (detachしてGeneratorの勾配計算を防ぐ)
-                with torch.no_grad(): # Generatorの勾配はここでは計算しない
-                    fake_output_g = model(input_tensor).detach()
-                # Discriminatorの入力は (Generatorの入力画像, 生成画像)
-                fake_input_d = torch.cat([input_tensor, fake_output_g], dim=1) # 入力画像を条件として結合
-                pred_fake = discriminator(fake_input_d)
-                loss_d_fake = lsgan_loss(pred_fake, False)
-
-                val_loss_d_real += loss_d_real
-                val_loss_d_fake += loss_d_fake
-
-                # c. Discriminatorの合計損失と更新
-                loss_d = (loss_d_real + loss_d_fake) * 0.5 # 0.5は一般的なスケールファクター
-                loss_d.backward()
-                optimizer_d.step()
-                
-
-            # ---------------------
-            # 2. Generator の学習
-            # ---------------------
-            optimizer.zero_grad() # Generatorのoptimizer (modelのoptimizer)
-
-            output_tensor: Tensor = model(input_tensor) # 再度生成（detachしていない）
+            with torch.amp.autocast_mode.autocast("cuda"):
 
             # Calculate L1 Loss
             l1_loss_per_pixel = l1_loss_fn(output_tensor, clean_tensor)
@@ -237,32 +203,17 @@ class RuntimeOptions:
                 scaled_clean_tensor = clean_tensor * 2.0 - 1.0
                 perceptual_losses_batch = lpips_loss_fn(scaled_output_tensor, scaled_clean_tensor)
                 loss_perceptual = torch.mean(perceptual_losses_batch)
-                total_loss += lp_weight * loss_perceptual
-                val_perceptual_loss += loss_perceptual.item()
-                if current_batch_total_losses is not None:
-                    current_batch_total_losses += lp_weight * perceptual_losses_batch
-
-            # Calculate GAN Loss (Generator)
-            # Input for Discriminator: (Input image of Generator, Generated image)
-            if discriminator and gan_weight and loss_d is not None:
-                scaled_input_tensor = input_tensor * 2.0 - 1.0
-                fake_input_for_g = torch.cat([scaled_input_tensor, scaled_output_tensor], dim=1)
-                pred_fake_for_g = discriminator(fake_input_for_g)
-                loss_g_adversarial = lsgan_loss(pred_fake_for_g, True) # Generatorは「本物と判定してほしい」のでTrue
-                total_loss += gan_weight * loss_g_adversarial
-                val_gan_loss_g += loss_g_adversarial.item()
-                val_discriminator_loss += loss_d.item()
-                if current_batch_total_losses is not None:
-                    current_batch_total_losses += gan_weight * lsgan_loss(pred_fake_for_g.detach(), True).squeeze()
-
-            val_total_loss += total_loss.item()
-
-            total_loss.backward()
-            optimizer.step()
+            # 勾配蓄積のための損失のスケーリング
+            # current_batch_total_loss_sum は autocast ブロック内で定義されているので、ここではその値を使う
+            scaled_loss = current_batch_total_loss_sum / opts.ga_steps
             
-            # スケジューラーを更新 (Optimizer.step() の直後が一般的)
-            scheduler.step(epochs + batch_idx / len(train_loader)) # type: ignore # 現在のエポック進捗を渡す
+            scaler.scale(scaled_loss).backward()
             
+            # 勾配蓄積ステップに達した場合、または最後のバッチの場合
+            if (batch_idx + 1) % opts.ga_steps == 0 or (batch_idx + 1) == len(train_loader):
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad() # 勾配をクリア
             # ハードマイニングのための、現在のバッチの各サンプルのTotal Lossを記録
             if current_batch_total_losses is not None:
                 # `original_full_dataset_indices` を `train_dataset` 内の相対インデックスに変換
@@ -314,7 +265,7 @@ class RuntimeOptions:
         val_total_loss = 0.0
         val_ssim_scores = [] 
 
-        with torch.no_grad():
+        with torch.no_grad(), torch.amp.autocast_mode.autocast("cuda"):
             for batch_idx, (input_tensor, clean_tensor, mask_tensor, _) in enumerate(tqdm(val_loader, disable=not progress, desc=f"Epoch {epoch+1} (Val)")):
                 input_tensor: Tensor = input_tensor.to(device)
                 clean_tensor: Tensor = clean_tensor.to(device)
