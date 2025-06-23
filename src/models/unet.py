@@ -3,6 +3,10 @@ from typing import Literal, cast
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
+# import torch.nn.functional as F
+import numpy as np
+import random
+
 from models.attention import CABlock, ECABlock, SEBlock, CBAM
 from utils.option_utils import make_options
 
@@ -141,13 +145,10 @@ class UNet(nn.Module):
             upsample_block = self.ups[i * 2] 
             res_block = self.ups[i * 2 + 1] 
             
-            x = upsample_block(x) # 変更点: upsample_block を呼び出す
+            x = upsample_block(x)
 
             skip_connection = skip_connections[i]
 
-            # サイズが合わない場合の調整 (クロップ)
-            # ConvTranspose2dを使わない場合、このクロップ処理はほとんど不要になるはずですが、
-            # 念のため残しておきます。厳密なサイズ合わせはUpsampleで可能です。
             if x.shape != skip_connection.shape:
                 _, _, H_x, W_x = x.shape
                 _, _, H_skip, W_skip = skip_connection.shape
@@ -156,16 +157,53 @@ class UNet(nn.Module):
                 if H_skip > H_x or W_skip > W_x:
                     diff_H = H_skip - H_x
                     diff_W = W_skip - W_x
-                    skip_connection = skip_connection[:, :, diff_H // 2 : H_skip - diff_H // 2,
-                                                             diff_W // 2 : W_skip - diff_W // 2]
+                    skip_connection = skip_connection[:, :, diff_H // 2 : H_skip - diff_H // 2, diff_W // 2 : W_skip - diff_W // 2]
                 # アップサンプリングされた方が大きい場合はクロップ (通常は起こらないはずだが念のため)
                 elif H_x > H_skip or W_x > W_skip:
                     diff_H = H_x - H_skip
                     diff_W = W_x - W_skip
-                    x = x[:, :, diff_H // 2 : H_x - diff_H // 2,
-                                     diff_W // 2 : W_x - diff_W // 2]
+                    x = x[:, :, diff_H // 2 : H_x - diff_H // 2, diff_W // 2 : W_x - diff_W // 2]
 
             concat_skip = torch.cat((skip_connection, x), dim=1)
             x = res_block(concat_skip) 
 
         return self.final_conv(x)
+
+    def save(self, path: torch.types.FileLike, **args):
+        torch.save({
+            'model_state_dict': self.state_dict(),
+            'random_state': {
+                'torch_rng_state': torch.get_rng_state(),
+                'torch_cuda_rng_state': torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+                'numpy_rng_state': np.random.get_state(),
+                'python_rng_state': random.getstate(),
+            },
+            **vars(self.opts),
+            **args,
+        }, path)
+
+    @classmethod
+    def load(cls, path: torch.types.FileLike, device: torch.device):
+        cp = torch.load(path, map_location=device, weights_only=False)
+        if not (isinstance(cp, dict) and 'model_state_dict' in cp):
+            raise RuntimeError("Unsupported model file.")
+        
+        model = cls(make_options(ModelOptions, cp, {})).to(device)
+        model.load_state_dict(cp['model_state_dict'])
+
+        if 'random_state' in cp:
+            random_state = cp['random_state']
+            torch.set_rng_state(cast(torch.Tensor, random_state['torch_rng_state']).to("cpu"))
+            if random_state['torch_cuda_rng_state'] is not None:
+                if torch.cuda.is_available():
+                    torch.cuda.set_rng_state(cast(torch.Tensor, random_state['torch_cuda_rng_state']).to("cpu"))
+                else:
+                    logging.warning("Warning: CUDA RNG state is not set because CUDA is not available.")
+            np.random.set_state(random_state['numpy_rng_state'])
+            random.setstate(random_state['python_rng_state'])
+            logging.info("Random states restored from checkpoint.")
+        else:
+            logging.warning("No random state found in checkpoint, using current random states.")
+
+        logging.info(f"Loaded model: {path}")
+        return model, cp
