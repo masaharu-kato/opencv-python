@@ -1,6 +1,7 @@
 import argparse
-import os
+import logging
 import random
+import sys
 import warnings
 from dataclasses import dataclass
 import numpy as np
@@ -20,6 +21,8 @@ from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from dataset import Dataset, DatasetOptions
 from models.unet import AttentionMethods, ModelOptions, UNet
 from utils.option_utils import make_options
+
+PATH_LOGGING = Path("log")
 @dataclass
 class TrainOptions:
     seed: int
@@ -38,67 +41,33 @@ class RuntimeOptions:
     no_progress: bool
 
 # --- メインの学習関数 ---
-def train_model(args):
 
-    dataset_dir = str(args.dataset_dir)
-    model_save_dir = str(args.model_save_dir)
-    in_channels = int(args.in_channels)
-    out_channels = int(args.in_channels)
-    in_size = (int(args.image_width), int(args.image_height))
-    features = [int(f) for f in args.features.split(',')]
-    gan_features = [int(f) for f in args.gan_features.split(',')] if args.gan_features else None
-    learning_rate = float(args.learning_rate)
-    gan_learning_rate = float(args.gan_learning_rate) if args.gan_learning_rate else learning_rate
-    train_split = float(args.train_split)
-    batch_size = int(args.batch_size)
-    epochs = int(args.epochs)
-    num_workers = int(args.num_workers)
-    lp_weight = float(args.lp_weight)
-    hm_temperature = float(args.hm_temperature) if args.hm_temperature else None # Hard-mining temperature parameter
-    gan_weight = float(args.gan_weight) if args.gan_weight else None
-    use_se_block = bool(args.use_se_block)
-    use_cbam = bool(args.use_cbam)
-    log_dir = str(args.log_dir) if args.log_dir else None
-    verbose = bool(args.verbose)
-    progress = bool(args.progress)
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO) # INFOレベル以上のメッセージを処理
+    if logger.hasHandlers():
+        logger.handlers.clear()
 
-    log_file_path = os.path.join(log_dir, os.path.basename(model_save_dir) + ".log") if log_dir else None
-    if log_file_path:
-        os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
-    log_file = open(log_file_path, mode='a') if log_file_path else None
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
-    def _print(*args, is_verbose=False, to_file=True, to_stdout=True, flush=False):
-        if not is_verbose or verbose:
-            if to_stdout:
-                print(*args, flush=flush)
-            if log_file and to_file:
-                dt = datetime.now().isoformat(sep=' ', timespec='seconds')
-                print(f"{dt}\t", *args, file=log_file, flush=flush)
-
-    _print(args, to_stdout=False)
+    PATH_LOGGING.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(PATH_LOGGING / f"{model_type_name}.log")
+    file_handler.setLevel(logging.INFO) # ファイルにはINFOレベル以上を書き出す
+    file_handler.setFormatter(formatter)
     
+    console_handler = logging.StreamHandler(sys.stdout) # 標準出力へ
+    console_handler.setLevel(logging.INFO) # コンソールにはINFOレベル以上を書き出す\
+    console_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    # Record uncaught exceptions to the log file
+    sys.excepthook = lambda exc_type, exc_value, exc_traceback: \
+        logger.exception("Uncaught exception:", exc_info=(exc_type, exc_value, exc_traceback))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    _print(f"Device: {device}")
-    
-    # モデルのインスタンス化
-    model = UNet(in_channels=in_channels, out_channels=out_channels, in_size=in_size, features=features, 
-                 use_se_block=use_se_block and not use_cbam,
-                 use_cbam=use_cbam).to(device)
-    # 最適化手法と損失関数の定義
-    optimizer = pytorch_optimizer.RAdam(model.parameters(), lr=learning_rate)
-    
-    # Discriminatorの定義
-    # Generatorの入力チャネル(3) + ターゲット画像チャネル(3) = 6
-    discriminator: Discriminator | None = None
-    optimizer_d: pytorch_optimizer.RAdam | None = None
-    if gan_weight:
-        if not gan_features:
-            raise RuntimeError("gan_features is not specified.")
-        discriminator = Discriminator(in_channels=in_channels + out_channels, features=gan_features).to(device)
-        optimizer_d = pytorch_optimizer.RAdam(discriminator.parameters(), lr=gan_learning_rate, betas=(0.5, 0.999)) # D用のOptimizer (通常はβ1=0.5)
+    logging.info(f"Device: {device}")
 
-    # データセットの準備
-    full_dataset = RelativeImagePairDataset(dataset_dir, in_size, 2 ** len(features))
+    logging.info(f"args: {args}")
 
     # データの分割
     train_size = int(train_split * len(full_dataset))
@@ -305,8 +274,7 @@ def train_model(args):
         avg_loss_d_fake = val_loss_d_fake / len(train_loader)
         avg_total_loss = val_total_loss / len(train_loader)
         
-        _print(f"Epoch [{epoch+1:4d}/{epochs:4d}] Average Train Loss: L1={avg_l1_loss:.4f}, LPIPS={avg_perceptual_loss:.4f}, GAN={avg_gan_loss_g:.4f} (dsc={avg_discriminator_loss:.4f},real={avg_loss_d_real:.4f},fake={avg_loss_d_fake:.4f}), Total={avg_total_loss:.4f}", is_verbose=True)
-
+        logging.info(f"Epoch [{epoch+1:4d}/{opts.epochs:4d}] Average Train Loss: L1={avg_l1_loss:.4f}, LPIPS={avg_perceptual_loss:.4f}, Total={avg_total_loss:.4f}")
 
         # バリデーション
         model.eval()
@@ -429,7 +397,7 @@ def train_model(args):
         if gan_weight:
             logtext += f", GAN={avg_gan_loss_g:.4f} (dsc={avg_discriminator_loss:.4f},real={avg_loss_d_real:.4f},fake={avg_loss_d_fake:.4f})"
         logtext += f", Total={avg_total_loss:.4f}, SSIM={avg_ssim:.4f}"
-        _print(logtext, flush=True)
+        logging.info(logtext)
 
         if f_best_improved:
             model_save_path = f"{model_save_dir}/model_ssim_{avg_ssim:.2f}.pth"
