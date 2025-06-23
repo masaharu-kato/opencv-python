@@ -8,6 +8,7 @@ import numpy as np
 import lpips
 import pytorch_optimizer
 import torch
+import torch.utils.tensorboard
 import torch.nn as nn
 import torch.nn.functional as F
 from datetime import datetime
@@ -23,6 +24,8 @@ from models.unet import AttentionMethods, ModelOptions, UNet
 from utils.option_utils import make_options
 
 PATH_LOGGING = Path("log")
+PATH_TENSORBOARD = Path("runs")
+
 @dataclass
 class TrainOptions:
     seed: int
@@ -64,10 +67,27 @@ class RuntimeOptions:
     # Record uncaught exceptions to the log file
     sys.excepthook = lambda exc_type, exc_value, exc_traceback: \
         logger.exception("Uncaught exception:", exc_info=(exc_type, exc_value, exc_traceback))
+    
+    # Setup TensorBoard logging
+    PATH_TENSORBOARD.mkdir(parents=True, exist_ok=True)
+    log_dir = PATH_TENSORBOARD / datetime.now().strftime("%Y%m%d-%H%M%S")
+    writer = torch.utils.tensorboard.SummaryWriter(log_dir)
+    logging.info(f"TensorBoard log directory: {log_dir}")
+
+    ropts = make_options(RuntimeOptions, {}, args)
+
+    logging.info("#### Starting training script ####")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info(f"Device: {device}")
 
     logging.info(f"args: {args}")
+
+    # Write graph to TensorBoard if model is new
+    if model_path is None:
+        dummy_iput = torch.randn(1, 3, model.opts.input_height, model.opts.input_width, device=device) # (B, C, H, W)
+        writer.add_graph(model, dummy_iput)
+
 
     # データの分割
     train_size = int(train_split * len(full_dataset))
@@ -276,6 +296,12 @@ class RuntimeOptions:
         
         logging.info(f"Epoch [{epoch+1:4d}/{opts.epochs:4d}] Average Train Loss: L1={avg_l1_loss:.4f}, LPIPS={avg_perceptual_loss:.4f}, Total={avg_total_loss:.4f}")
 
+        # TensorBoardへのログ記録
+        writer.add_scalar('Loss/Train/L1', avg_l1_loss, epoch)
+        writer.add_scalar('Loss/Train/LPIPS', avg_perceptual_loss, epoch)
+        writer.add_scalar('Loss/Train/Total', avg_total_loss, epoch)
+
+
         # バリデーション
         model.eval()
 
@@ -359,12 +385,12 @@ class RuntimeOptions:
                 val_total_loss += total_loss.item()
                 
                 # --- SSIM 計算 ---
-                for i in range(input_tensor.shape[0]): 
-                    output_img = (output_tensor[i].detach().cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-                    clean_img = (clean_tensor[i].detach().cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-                    
-                    current_ssim = ssim_metric(output_img, clean_img, data_range=255, channel_axis=2, win_size=11)
-                    val_ssim_scores.append(current_ssim)
+
+                if batch_idx < 4:
+                    writer.add_image('Val_Images/Input', input_tensor[0], epoch)
+                    writer.add_image('Val_Images/Clean', clean_tensor[0], epoch)
+                    writer.add_image('Val_Images/Output', output_tensor[0], epoch)
+
 
         avg_l1_loss = val_l1_loss / len(val_loader)
         avg_perceptual_loss = val_perceptual_loss / len(val_loader)
@@ -399,6 +425,13 @@ class RuntimeOptions:
         logtext += f", Total={avg_total_loss:.4f}, SSIM={avg_ssim:.4f}"
         logging.info(logtext)
 
+        writer.add_scalar('Loss/Val/L1', avg_l1_loss, epoch)
+        writer.add_scalar('Loss/Val/LPIPS', avg_perceptual_loss, epoch)
+        writer.add_scalar('Loss/Val/Total', avg_total_loss, epoch)
+        writer.add_scalar('Metrics/Val_SSIM', avg_ssim, epoch)
+
+        writer.add_scalar('LearningRate', optimizer.param_groups[0]['lr'], epoch)
+
         if f_best_improved:
             model_save_path = f"{model_save_dir}/model_ssim_{avg_ssim:.2f}.pth"
             os.makedirs(name=model_save_dir, exist_ok=True)
@@ -413,8 +446,9 @@ class RuntimeOptions:
         prev_avg_total_loss = avg_total_loss
         prev_avg_ssim = avg_ssim
 
-    if log_file:
-        log_file.close()
+        writer.flush()
+
+    writer.close()
 
 
 # --- コマンドライン引数パーサー ---
