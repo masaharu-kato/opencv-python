@@ -9,11 +9,12 @@ class ResBlock(nn.Module):
     def __init__(self, in_channels, out_channels, use_se_block=False, use_cbam=False): # << use_cbamフラグを追加
         super(ResBlock, self).__init__()
         
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
+         # Set padding_mode to 'reflect' to avoid reflection padding issues
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False, padding_mode='reflect')
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.relu1 = nn.ReLU(inplace=True)
 
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False, padding_mode='reflect')
         self.bn2 = nn.BatchNorm2d(out_channels)
 
         # アテンションモジュールの選択
@@ -29,6 +30,8 @@ class ResBlock(nn.Module):
         if in_channels == out_channels:
             self.shortcut = nn.Identity()
         else:
+            # 1x1 conv for shortcut doesn't typically need reflection padding
+            # as it mostly handles channel dimension change.
             self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
         
         self.final_relu = nn.ReLU(inplace=True) # Residual Add後にReLU
@@ -78,7 +81,7 @@ class UNet(nn.Module):
             self.ups.append(
                 nn.Sequential(
                     nn.Upsample(scale_factor=2, mode='nearest'), # 最近傍補間
-                    nn.Conv2d(feature * 2, feature, kernel_size=3, padding=1, bias=False), # 通常の畳み込み
+                    nn.Conv2d(feature * 2, feature, kernel_size=3, padding=1, bias=False, padding_mode='reflect'),
                     nn.BatchNorm2d(feature),
                     nn.ReLU(inplace=True)
                 )
@@ -88,7 +91,8 @@ class UNet(nn.Module):
         # --- 変更ここまで ---
 
         self.final_conv = nn.Sequential(
-            nn.Conv2d(self.features[0], out_channels, kernel_size=1),
+            # padding_mode='reflect' is not needed here as the final conv is 1x1
+            nn.Conv2d(self.opts.features[0], self.output_channels, kernel_size=1),
             nn.Sigmoid() 
         )
 
