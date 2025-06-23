@@ -1,12 +1,20 @@
+from typing import Literal, cast
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from models.attention import CABlock, ECABlock, SEBlock, CBAM
 
-from models.attention import SEBlock, CBAM # 新しく定義したAttentionモジュールをインポート
+AttentionMethods = Literal[
+    'Identity', # nn.Identity
+    'SE_BLOCK', # Squeeze-and-Excitation Block
+    'CBAM',     # Convolutional Block Attention Module
+    'ECANet',   # Efficient Channel Attention Network
+    'CA'        # Coordinate Attention
+]
 
-# --- Residual Block with optional SEBlock/CBAM ---
+
+# --- Residual Block with optional attention method ---
 class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, use_se_block=False, use_cbam=False): # << use_cbamフラグを追加
+    def __init__(self, in_channels: int, out_channels: int, attention_method: AttentionMethods):
         super(ResBlock, self).__init__()
         
          # Set padding_mode to 'reflect' to avoid reflection padding issues
@@ -17,12 +25,15 @@ class ResBlock(nn.Module):
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False, padding_mode='reflect')
         self.bn2 = nn.BatchNorm2d(out_channels)
 
-        # アテンションモジュールの選択
-        # CBAMが有効な場合はCBAMを優先し、SEBlockは無効化する
-        if use_cbam:
+        if attention_method == 'CBAM':
             self.attention_module = CBAM(out_channels)
-        elif use_se_block:
+        elif attention_method == 'SE_BLOCK':
             self.attention_module = SEBlock(out_channels)
+        elif attention_method == 'ECANet':
+            self.attention_module = ECABlock(out_channels) # << ECABlock をインスタンス化
+        elif attention_method == 'CA':
+            # CA は入力と出力のチャネル数を引数にとるため、out_channels を2回渡す
+            self.attention_module = CABlock(out_channels, out_channels) # << CABlock をインスタンス化
         else:
             self.attention_module = nn.Identity() # 何もしないモジュール
 

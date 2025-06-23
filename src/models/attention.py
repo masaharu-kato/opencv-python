@@ -69,3 +69,79 @@ class CBAM(nn.Module):
         # その結果を空間アテンションの結果でスケーリング
         x = self.spatial_attention(x) * x 
         return x
+    
+# --- ECANet (Efficient Channel Attention Network) の追加 ---
+# 論文: ECA-Net: Efficient Channel Attention for Deep Convolutional Neural Networks (CVPR 2020)
+class ECABlock(nn.Module):
+    def __init__(self, channel, gamma=2, b=1):
+        super(ECABlock, self).__init__()
+        # 論文の推奨に基づいて、チャネル数Cに応じてカーネルサイズkを適応的に決定
+        # k = | (log2(C) / gamma) + b | の最も近い奇数
+        self.k = int(abs(torch.log2(torch.tensor(channel)) / gamma + b))
+        if self.k % 2 == 0: # カーネルサイズは奇数にする
+            self.k += 1
+        
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size=self.k, padding=(self.k - 1) // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # x: (B, C, H, W)
+        y = self.avg_pool(x) # (B, C, 1, 1)
+        # 1D畳み込みのためにテンソルの形状を変更 (B, C, 1)
+        y = y.squeeze(-1).permute(0, 2, 1) # (B, 1, C)
+        y = self.conv(y) # (B, 1, C)
+        y = y.permute(0, 2, 1).unsqueeze(-1) # (B, C, 1, 1)
+        y = self.sigmoid(y)
+        return x * y.expand_as(x)
+
+# --- Coordinate Attention (CA) の追加 ---
+# 論文: Coordinate Attention for Efficient Mobile Network Design (CVPR 2021)
+class Hsigmoid(nn.Module):
+    """
+    H-Swishの代わりに使われることが多い活性化関数
+    """
+    def __init__(self, inplace=True):
+        super(Hsigmoid, self).__init__()
+        self.relu = nn.ReLU6(inplace=inplace)
+
+    def forward(self, x):
+        return self.relu(x + 3) / 6
+
+class CABlock(nn.Module):
+    def __init__(self, inp, oup, reduction=32):
+        super(CABlock, self).__init__()
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1)) # 高さ方向に平均プーリング
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None)) # 幅方向に平均プーリング
+
+        mid_channels = inp // reduction
+        self.conv1 = nn.Conv2d(inp, mid_channels, kernel_size=1, stride=1, padding=0)
+        self.bn1 = nn.BatchNorm2d(mid_channels)
+        self.relu = nn.ReLU() # Original paper uses Swish, but ReLU is common for simplicity
+
+        self.conv_h = nn.Conv2d(mid_channels, oup, kernel_size=1, stride=1, padding=0)
+        self.conv_w = nn.Conv2d(mid_channels, oup, kernel_size=1, stride=1, padding=0)
+
+        # Hsigmoid は論文で使われているが、通常のSigmoidも代替として使われる
+        # 今回はHsigmoidを実装
+        self.hsigmoid = Hsigmoid() # nn.Sigmoid()
+
+    def forward(self, x):
+        identity = x
+        
+        n, c, h, w = x.size()
+        x_h = self.pool_h(x) # (N, C, H, 1)
+        x_w = self.pool_w(x).permute(0, 1, 3, 2) # (N, C, W, 1)
+
+        y = torch.cat([x_h, x_w], dim=2) # (N, C, H+W, 1)
+        y = self.conv1(y)
+        y = self.bn1(y)
+        y = self.relu(y)
+
+        x_h, x_w = torch.split(y, [h, w], dim=2)
+        x_w = x_w.permute(0, 1, 3, 2)
+
+        a_h = self.hsigmoid(self.conv_h(x_h)) # (N, C, H, 1)
+        a_w = self.hsigmoid(self.conv_w(x_w)) # (N, C, 1, W)
+
+        return identity * a_h.expand_as(identity) * a_w.expand_as(identity)
