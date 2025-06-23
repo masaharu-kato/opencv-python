@@ -1,3 +1,4 @@
+import logging
 import sys
 import cv2
 import numpy as np
@@ -8,7 +9,7 @@ def align_images_with_optical_flow(image_a_path, image_g_path):
     img_g_color = cv2.imread(image_g_path)
 
     if img_a_color is None or img_g_color is None:
-        print(f"Error: Could not read images {image_a_path} or {image_g_path}")
+        logging.error(f"Could not read images {image_a_path} or {image_g_path}")
         return None
     
     # アルファチャンネルを追加してRGBAに変換
@@ -32,16 +33,10 @@ def align_images_with_optical_flow(image_a_path, image_g_path):
     # poly_n: 多項式展開の近似サイズ (通常5または7)
     # poly_sigma: ガウシアンの標準偏差 (poly_n=5なら1.1、poly_n=7なら1.5)
     # flags: 0, cv2.OPTFLOW_FARNEBACK_GAUSSIAN など
-    flow = cv2.calcOpticalFlowFarneback(prev=img_a_gray, 
-                                        next=img_g_gray, 
-                                        flow=None, 
-                                        pyr_scale=0.5, 
-                                        levels=3, 
-                                        winsize=15, 
-                                        iterations=3, 
-                                        poly_n=5, 
-                                        poly_sigma=1.1, 
-                                        flags=0)
+    flow = cv2.calcOpticalFlowFarneback(
+        prev=img_a_gray, next=img_g_gray,
+        flow=None, # type: ignore
+        pyr_scale=0.5, levels=3, winsize=15, iterations=3, poly_n=5, poly_sigma=1.1, flags=0)
 
     # 変位ベクトル場 (flow) からワープ用のマッピング座標を生成
     # meshgrid で画像の各ピクセル座標を生成
