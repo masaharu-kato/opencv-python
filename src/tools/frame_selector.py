@@ -45,8 +45,8 @@ def calculate_image_quality_metrics(img_bgr):
 
     # 白飛び/黒潰れピクセル比率
     # 例: 0-10 を黒潰れ、245-255 を白飛びとする
-    black_pixels = np.sum(img_gray < 10)
-    white_pixels = np.sum(img_gray > 245)
+    black_pixels = np.sum(img_gray < 10) # type: ignore
+    white_pixels = np.sum(img_gray > 245) # type: ignore
     total_pixels = img_gray.size
     
     black_clip_ratio = black_pixels / total_pixels
