@@ -49,8 +49,24 @@ def get_constructor_from_type_hint(type_hint: Any) -> Callable:
         raise ValueError(f"Unsupported type hint: {type_hint}")
 
 
+# def make_dataclass_from_args_or_instance(cls, instance_or_args: Any = None, **args):
+#     """
+#     Convert a dataclass or a dictionary of arguments into a dataclass instance.
+#     If `arg_or_instance` is an instance of `cls`, it returns it directly.
+#     Otherwise, it treats `arg_or_instance` as a dictionary of arguments.
+#     """
+#     if isinstance(instance_or_args, cls):
+#         return instance_or_args
+#     elif isinstance(instance_or_args, dict):
+#         return make_dataclass_from_args(cls, instance_or_args)
+#     return make_dataclass_from_args(cls, args)
 
-def make_options(cls, cp, args):
+
+def make_dataclass_from_args(cls, args):
+    return make_dataclass_from_cp_args(cls, None, args)
+
+
+def make_dataclass_from_cp_args(cls, cp, args):
     """
     Convert a checkpoint and arguments into a dataclass instance.
     """

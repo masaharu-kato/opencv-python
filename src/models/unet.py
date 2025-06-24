@@ -8,7 +8,7 @@ import numpy as np
 import random
 
 from models.attention import CABlock, ECABlock, SEBlock, CBAM
-from utils.option_utils import make_options
+from utils.option_utils import make_dataclass_from_cp_args
 
 AttentionMethods = Literal[
     'Identity', # nn.Identity
@@ -188,7 +188,7 @@ class UNet(nn.Module):
         if not (isinstance(cp, dict) and 'model_state_dict' in cp):
             raise RuntimeError("Unsupported model file.")
         
-        model = cls(make_options(ModelOptions, cp, {})).to(device)
+        model = cls(make_dataclass_from_cp_args(ModelOptions, cp, {})).to(device)
         model.load_state_dict(cp['model_state_dict'])
 
         if 'random_state' in cp:
