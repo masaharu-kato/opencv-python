@@ -1,7 +1,6 @@
 import itertools
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO
 import torch.utils.data
 from torchvision import transforms
 from PIL import Image
@@ -12,18 +11,19 @@ from models.unet import ModelOptions
 @dataclass
 class DatasetOptions:
     """Options for the dataset."""
-    load_all_to_ram: bool = True
+    # load_all_to_ram: bool = True
 
 class ImageCache:
     """A simple cache for images to avoid reloading them multiple times."""
     def __init__(self):
-        self.cache = {}
+        self.cache: dict[tuple[Path, tuple[int, int]], tuple[Image.Image, Image.Image]] = {} # ((path, (width, height)) -> Image)
 
-    def get(self, path: Path) -> Image.Image:
-        if path not in self.cache:
-            img = Image.open(path).convert("RGBA")
-            self.cache[path] = img
-        return self.cache[path]
+    def get(self, path: Path, imgsize: tuple[int, int]) -> tuple[Image.Image, Image.Image]: # (RGB, A)
+        if (path, imgsize) not in self.cache:
+            img = Image.open(path).convert("RGBA").resize(imgsize)
+            img.load()  # Load the image data into memory
+            self.cache[path, imgsize] = (img.convert("RGB"), img.getchannel("A"))  # Store RGB and alpha channel separately
+        return self.cache[path, imgsize]
 
 cache = ImageCache()
 
@@ -35,40 +35,15 @@ class ImagePairDataset(torch.utils.data.Dataset):
         self.ppair_groups = ppair_groups
         self.path_pairs = list(itertools.chain.from_iterable(self.ppair_groups))
 
-        # データ拡張（ランダムクロップ、フリップなど）
-        # 学習時に適用することで、モデルの汎化能力を高めます
         self.transform = transforms.Compose([
-            # *([transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2)] if use_cj else []),
-            transforms.Resize(model_opts.input_size()), # Resize
+            # transforms.Resize(self.input_size), # Already resized in cache
             transforms.ToTensor(), # PIL Image to Tensor (0-1 range)
         ])
 
-    def split(self, ratio: float) -> tuple['ImagePairDataset', 'ImagePairDataset']:
-        """Splits the dataset into two datasets based on the given ratio."""
-        return self._split(self.ppair_groups, ratio)
-    
-    def random_split(self, ratio: float) -> tuple['ImagePairDataset', 'ImagePairDataset']:
-        """Randomly splits the dataset into two datasets based on the given ratio."""
-        groups = self.ppair_groups.copy_shuffled()  # Shuffle the groups before splitting
-        return self._split(groups, ratio)
-
-    def _split(self, groups: PathPairGroups, ratio: float) -> tuple['ImagePairDataset', 'ImagePairDataset']:
-        """Splits into two datasets baased on the image groups"""
-        if len(groups) == 0:
-            raise ValueError("Empty dataset, cannot split.")
-        if ratio < 0 or ratio > 1:
-            raise ValueError("Ratio must be between 0 and 1.")
-        if len(groups) == 1:
-            if ratio == 0:
-                return self.clone(self.ppair_groups), self.clone(PathPairGroups())  # Return the original dataset and an empty one
-            elif ratio == 1:
-                return self.clone(PathPairGroups()), self.clone(self.ppair_groups)  # Return an empty dataset and the original one
-            raise ValueError("Cannot split a single group dataset without 0 or 1 ratio.")
-        
-        split_index = min(max(1, int(len(groups) * ratio)), len(groups) - 1)  # Ensure at least one group in each split
-        group1, group2 = groups.split(split_index)
-        return self.clone(group1), self.clone(group2)
-
+    @property
+    def input_size(self) -> tuple[int, int]:
+        """Returns the image size as (height, width)."""
+        return self.model_opts.input_size
     
     def clone(self, groups: PathPairGroups) -> 'ImagePairDataset':
         """Creates a new dataset with the same options but different path groups."""
@@ -80,16 +55,11 @@ class ImagePairDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx: int):
 
         ppair= self.path_pairs[idx]
-        bimg, gimg = cache.get(ppair.bpath), cache.get(ppair.gpath)
+        (bimg_rgb, _), (gimg_rgb, gimg_a) = cache.get(ppair.bpath, self.input_size), cache.get(ppair.gpath, self.input_size)
 
-        bimg_rgb = bimg.convert("RGB")
-        gimg_rgb = gimg.convert("RGB")
-        # アルファチャンネルを抽出
-        gimg_alpha = gimg.getchannel("A")
-        
         btensor = self.transform(bimg_rgb)
         gtensor = self.transform(gimg_rgb)
-        gmasktensor = self.transform(gimg_alpha)
+        gmasktensor = self.transform(gimg_a)
 
         return btensor, gtensor, gmasktensor, idx
 
