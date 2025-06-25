@@ -3,7 +3,6 @@ import logging
 import os
 import random
 import sys
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
@@ -18,7 +17,8 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
-from datasets.dataset import DatasetOptions, ImagePairDataset, PathGroups
+from datasets.dataset import DatasetOptions, ImagePairDataset
+from datasets.path_pair_groups import PathPairGroups
 from losses.loss import LPIPS_MODEL, LPIPS, MaskedL1, SSIM
 from models.unet import AttentionMethods, ModelOptions, UNet
 from utils.option_utils import make_dataclass_from_args, make_dataclass_from_cp_args
@@ -41,6 +41,7 @@ class TrainOptions:
 def train_model(*,
     model_path: Path | str | None = None,
     model_dir: Path | str | None = None,
+    dataset_dir: Path | str | None = None,
     num_workers: int | None = None,
     verbose: bool = False,
     no_progress: bool = False,
@@ -99,7 +100,6 @@ def train_model(*,
     logging.info(f"args: {args}")
     torch.backends.cudnn.benchmark = True
 
-
     num_workers = num_workers if num_workers is not None else (os.cpu_count() or 2) - 1
 
 
@@ -129,14 +129,11 @@ def train_model(*,
 
         # Preapre dataset
         dataset_opts = make_dataclass_from_args(DatasetOptions,  args)
-        path_groups = PathGroups()
-        if dataset_files is None or len(dataset_files) == 0:
+        if dataset_dir is None:
             logging.error("No dataset files specified.")
             return
-        for file in dataset_files:
-            path_groups.extend_from_file(Path(file))
         
-        full_dataset = ImagePairDataset(path_groups, dataset_opts, model.opts)
+        full_dataset = ImagePairDataset(PathPairGroups.from_dir(Path(dataset_dir)), dataset_opts, model.opts)
         full_train_dataset, val_dataset = full_dataset.random_split(opts.train_split)
         train_dataset, inactive_train_dataset = full_train_dataset.split(opts.active_train_split)
 
@@ -334,9 +331,9 @@ def train_model(*,
                 train=opts,
                 dataset={
                     'opts': dataset_opts,
-                    'train_dataset_path_groups': train_dataset.path_groups.dump(),
-                    'inactive_train_dataset_path_groups': inactive_train_dataset.path_groups.dump(),
-                    'val_dataset_path_groups': val_dataset.path_groups.dump(),
+                    'train_dataset_path_groups': train_dataset.ppair_groups.dump(),
+                    'inactive_train_dataset_path_groups': inactive_train_dataset.ppair_groups.dump(),
+                    'val_dataset_path_groups': val_dataset.ppair_groups.dump(),
                 },
                 epoch=epoch,
                 optimizer=optimizer.state_dict(),
@@ -359,7 +356,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="画像画質向上モデル (UNet) の強化版学習スクリプト。")
     parser.add_argument("-m" ,"--model_path", type=str, help="Model file path (.pth) to load (continue training)")
     parser.add_argument("-md" ,"--model_dir", type=str, help="Model save directory (new model will be saved here)")
-    parser.add_argument("-d", "--dataset_files", type=str, nargs='*', help="Dataset files to load (good_path bad_path1 bad_path2 ...)")
+    parser.add_argument("-d", "--dataset_dir", type=str, help="Dataset directory containing image pairs (good and bad images).")
     parser.add_argument("-imgw", "--input_width", type=int, help="Input image width")
     parser.add_argument("-imgh", "--input_height", type=int, help="Input image height")
     parser.add_argument("-bs", "--batch_size", type=int, help="学習バッチサイズ。GPUメモリに合わせて調整。")
@@ -368,7 +365,8 @@ if __name__ == "__main__":
     parser.add_argument("-lr", "--learning_rate", type=float, help="初期学習率。")
     parser.add_argument("-lp", "--lp_weight", type=float, help="LPIPS weight")
     parser.add_argument("-lpm", "--lp_model", type=float, choices=list(LPIPS_MODEL.__args__), help="LPIPS Model")
-    parser.add_argument("-ts", "--train_split", type=float, help="学習データセットの割合。残りは検証データセット。")
+    parser.add_argument("-ats", "--active_train_split", type=float, help="Radio of training data to use for training (0.0-1.0) in the training dataset.")
+    parser.add_argument("-ts", "--train_split", type=float, help="Radio of training data to use for training (0.0-1.0). The rest will be used for validation.")
     parser.add_argument("-nw", "--num_workers", type=int, help="データローダーが使用するワーカースレッド数。")
     parser.add_argument("-ft", "--features", type=str, help="UNetの各ステージのチャネル数をカンマ区切りで指定 (例: '64,128,256,512')。")
     parser.add_argument("-at", "--attention_method", choices=list(AttentionMethods.__args__), help="Attention methods to use")

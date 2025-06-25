@@ -6,7 +6,7 @@ import torch.utils.data
 from torchvision import transforms
 from PIL import Image
 
-from datasets.path_groups import PathGroups
+from datasets.path_pair_groups import PathPairGroups
 from models.unet import ModelOptions
 
 @dataclass
@@ -29,13 +29,11 @@ cache = ImageCache()
 
 
 class ImagePairDataset(torch.utils.data.Dataset):
-    def __init__(self, path_groups: PathGroups, opts: DatasetOptions, model_opts: ModelOptions):
+    def __init__(self, ppair_groups: PathPairGroups, opts: DatasetOptions, model_opts: ModelOptions):
         self.opts = opts
         self.model_opts = model_opts
-        self.path_groups = path_groups
-        self.path_pairs: list[tuple[Path, Path]] = list(itertools.chain.from_iterable(
-            group.iter_pairs() for group in self.path_groups
-        ))
+        self.ppair_groups = ppair_groups
+        self.path_pairs = list(itertools.chain.from_iterable(self.ppair_groups))
 
         # データ拡張（ランダムクロップ、フリップなど）
         # 学習時に適用することで、モデルの汎化能力を高めます
@@ -47,14 +45,14 @@ class ImagePairDataset(torch.utils.data.Dataset):
 
     def split(self, ratio: float) -> tuple['ImagePairDataset', 'ImagePairDataset']:
         """Splits the dataset into two datasets based on the given ratio."""
-        return self._split(self.path_groups, ratio)
+        return self._split(self.ppair_groups, ratio)
     
     def random_split(self, ratio: float) -> tuple['ImagePairDataset', 'ImagePairDataset']:
         """Randomly splits the dataset into two datasets based on the given ratio."""
-        groups = self.path_groups.copy_shuffled()  # Shuffle the groups before splitting
+        groups = self.ppair_groups.copy_shuffled()  # Shuffle the groups before splitting
         return self._split(groups, ratio)
 
-    def _split(self, groups: PathGroups, ratio: float) -> tuple['ImagePairDataset', 'ImagePairDataset']:
+    def _split(self, groups: PathPairGroups, ratio: float) -> tuple['ImagePairDataset', 'ImagePairDataset']:
         """Splits into two datasets baased on the image groups"""
         if len(groups) == 0:
             raise ValueError("Empty dataset, cannot split.")
@@ -62,9 +60,9 @@ class ImagePairDataset(torch.utils.data.Dataset):
             raise ValueError("Ratio must be between 0 and 1.")
         if len(groups) == 1:
             if ratio == 0:
-                return self.clone(self.path_groups), self.clone(PathGroups())  # Return the original dataset and an empty one
+                return self.clone(self.ppair_groups), self.clone(PathPairGroups())  # Return the original dataset and an empty one
             elif ratio == 1:
-                return self.clone(PathGroups()), self.clone(self.path_groups)  # Return an empty dataset and the original one
+                return self.clone(PathPairGroups()), self.clone(self.ppair_groups)  # Return an empty dataset and the original one
             raise ValueError("Cannot split a single group dataset without 0 or 1 ratio.")
         
         split_index = min(max(1, int(len(groups) * ratio)), len(groups) - 1)  # Ensure at least one group in each split
@@ -72,23 +70,24 @@ class ImagePairDataset(torch.utils.data.Dataset):
         return self.clone(group1), self.clone(group2)
 
     
-    def clone(self, groups: PathGroups) -> 'ImagePairDataset':
+    def clone(self, groups: PathPairGroups) -> 'ImagePairDataset':
         """Creates a new dataset with the same options but different path groups."""
         return ImagePairDataset(groups, self.opts, self.model_opts)
 
     def __len__(self) -> int:
         return len(self.path_pairs)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int):
 
-        bpath, gpath = self.path_pairs[idx]
-        bimg, gimg = cache.get(bpath), cache.get(gpath)
+        ppair= self.path_pairs[idx]
+        bimg, gimg = cache.get(ppair.bpath), cache.get(ppair.gpath)
 
+        bimg_rgb = bimg.convert("RGB")
         gimg_rgb = gimg.convert("RGB")
         # アルファチャンネルを抽出
         gimg_alpha = gimg.getchannel("A")
         
-        btensor = self.transform(bimg)
+        btensor = self.transform(bimg_rgb)
         gtensor = self.transform(gimg_rgb)
         gmasktensor = self.transform(gimg_alpha)
 
