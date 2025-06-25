@@ -48,7 +48,8 @@ class RuntimeOptions:
 def train_model(*,
     model_path: Path | str | None = None,
     model_dir: Path | str | None = None,
-    dataset_files: Sequence[Path | str] | None = None,
+    reset_optimizer: bool = False,
+    reset_scheduler: bool = False,
     **args
 ):
 
@@ -159,24 +160,23 @@ def train_model(*,
         inactive_train_dataset = ImagePairDataset(PathGroups.from_dump(cp['dataset']['inactive_train_dataset_path_groups']), dataset_opts, model.opts)
         val_dataset = ImagePairDataset(PathGroups.from_dump(cp['dataset']['val_dataset_path_groups']), dataset_opts, model.opts)
         
+    optimizer = pytorch_optimizer.RAdam(model.parameters(), lr=opts.learning_rate)
+    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=1, eta_min=1e-6)
 
-    if 'optimizer' in cp:
-        optimizer = pytorch_optimizer.RAdam(model.parameters())
-        optimizer.load_state_dict(cp['optimizer'])
-        logging.info('Loaded optimizer state dict.')
-    else:
-        if model_path is not None:
-            logging.warning("No optimizer state found in checkpoint. Using default optimizer settings.")
-        optimizer = pytorch_optimizer.RAdam(model.parameters(), lr=opts.learning_rate)
-    
-    if 'scheduler' in cp:
-        scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10)
-        scheduler.load_state_dict(cp['scheduler'])
-        logging.info('Loaded scheduler state dict. ')
-    else:
-        if model_path is not None:
-            logging.warning("No scheduler state found in checkpoint. Using default scheduler settings.")
-        scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=1, eta_min=1e-6)
+    if model_path is not None:
+        if not reset_optimizer:
+            if 'optimizer' not in cp:
+                logging.error("Checkpoint does not contain optimizer state.")
+                return
+            optimizer.load_state_dict(cp['optimizer'])
+            logging.info('Loaded optimizer state dict.')
+
+        if not reset_scheduler:
+            if 'scheduler' not in cp:
+                logging.error("Checkpoint does not contain scheduler state.")
+                return
+            scheduler.load_state_dict(cp['scheduler'])
+            logging.info('Loaded scheduler state dict. ')
 
     logging.info(f"Optimizer: {optimizer}")
     logging.info(f"Scheduler: {scheduler}")
@@ -378,6 +378,8 @@ if __name__ == "__main__":
     parser.add_argument("-at", "--attention_method", choices=list(AttentionMethods.__args__), help="Attention methods to use")
     parser.add_argument("-v", "--verbose", action="store_true", help="show train and progress message")
     parser.add_argument("-nop", "--no_progress", action="store_true", help="hide progress bar")
+    parser.add_argument("-ro", "--reset_optimizer", action="store_true", help="Reset optimizer state (ignore checkpoint)")
+    parser.add_argument("-rs", "--reset_scheduler", action="store_true", help="Reset scheduler state (ignore checkpoint)")
     parser.add_argument("-seed", "--seed", type=int, help="Random seed")
 
     args = parser.parse_args()
