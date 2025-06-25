@@ -142,7 +142,7 @@ def train_model(*,
     #   Load model from checkpoint
     # --------------------------------------------------
     else:
-        model, cp = UNet.load(model_path, device)
+        model, cp = UNet.load(model_path, device, args)
         opts = make_dataclass_from_cp_args(TrainOptions, cp.get('train', None), args)
 
         if 'dataset' not in cp or any(key not in cp['dataset'] for key in ['train_dataset_path_groups', 'inactive_train_dataset_path_groups', 'val_dataset_path_groups']):

@@ -1,5 +1,5 @@
 import logging
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
@@ -183,12 +183,12 @@ class UNet(nn.Module):
         }, path)
 
     @classmethod
-    def load(cls, path: torch.types.FileLike, device: torch.device):
+    def load(cls, path: torch.types.FileLike, device: torch.device, args: dict[str, Any]):
         cp = torch.load(path, map_location=device, weights_only=False)
         if not (isinstance(cp, dict) and 'model_state_dict' in cp):
             raise RuntimeError("Unsupported model file.")
         
-        model = cls(make_dataclass_from_cp_args(ModelOptions, cp, {})).to(device)
+        model = cls(make_dataclass_from_cp_args(ModelOptions, cp, args)).to(device)
         model.load_state_dict(cp['model_state_dict'])
 
         if 'random_state' in cp:
