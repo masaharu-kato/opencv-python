@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 import torch
 import cv2
+from cv2.typing import MatLike
 import numpy as np
 import os
 import argparse
@@ -11,94 +12,77 @@ from tqdm import tqdm
 
 from models.unet import UNet
 
-# --- メインの推論関数 ---
-def apply_model(model_path: Path, input_dir: Path, output_dir: Path, image_width: int | None = None, image_height: int | None = None):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logging.info(f"Device: {device}")
-    
-    if not model_path.exists():
-        raise RuntimeError(f"Model file not found: {model_path}")
-    
-    try:
-        model, cp = UNet.load(model_path, device, {})
-        model.load_state_dict(model.state_dict())
 
-    except Exception as e:
-        raise RuntimeError(f"An error has occured while model loading: {e}") from e
-    
-    image_width = image_width or cp['image_width']
-    image_height = image_height or cp['image_height']
+class ModelApplyer:
+    """A class to apply a pre-trained model to images for enhancement."""
 
-    model.eval() # Evaluation mode
-
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # transform = transforms.Compose([
-    #     transforms.Resize((image_height, image_width)),
-    #     transforms.ToTensor(),
-    # ])
-
-    image_files = sorted(input_dir.glob("*.png"))
-    
-    if not image_files:
-        logging.info(f"No images found in {input_dir}")
-        return
-
-    logging.info(f"\n--- Model application start ---")
-    logging.info(f"Detected {len(image_files)} images.")
-
-    # モデルが要求する入力サイズの倍数 (U-Netの層数に応じて変更)
-    # 例: 3層U-Netなら 2^3=8
-    # コマンドライン引数に追加するか、args.image_width/heightから逆算するなど
-    model_multiple = 2 ** len(cp['features']) # features_listの数で層数を判断 (近似)
-                                          # あるいは args.model_multiple を追加
-
-    for img_path in tqdm(image_files, desc="Processing"):
+    def __init__(self, model_path: Path):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model_path = model_path
         
-        input_image_bgr = cv2.imread(str(img_path))
-        if input_image_bgr is None:
-            logging.info(f"Warning: Failed to load {img_path}")
-            continue
+        if not model_path.exists():
+            raise RuntimeError(f"Model file not found: {model_path}")
+        
+        try:
+            model, cp = UNet.load(model_path, self.device, {})
+            model.load_state_dict(model.state_dict())
+
+        except Exception as e:
+            raise RuntimeError(f"An error has occured while model loading: {e}") from e
+        
+        model.eval() # Evaluation mode
+        self.model = model
+        self.cp = cp
+
+        # transform = transforms.Compose([
+        #     transforms.Resize((image_height, image_width)),
+        #     transforms.ToTensor(),
+        # ])
+
+    def apply(self, input_image_bgr: MatLike) -> MatLike:
         
         input_image_rgb = cv2.cvtColor(input_image_bgr, cv2.COLOR_BGR2RGB)
-        
         input_image_pil = Image.fromarray(input_image_rgb)
-        
-        # --- ここからパディング処理の追加 ---
-        # original_width, original_height = input_image_pil.size
-        # padded_input_pil, padding_coords = pad_to_multiple(input_image_pil, model_multiple, fill_value=(0,0,0))
-        padded_input_pil = input_image_pil.resize((image_width, image_height))
-        
-        # Convert to a tensor
-        input_tensor = transforms.ToTensor()(padded_input_pil).unsqueeze(0).to(device)
+        input_tensor = transforms.ToTensor()(input_image_pil).unsqueeze(0).to(self.device)
 
         with torch.no_grad(): # 勾配計算を無効化
-            output_tensor = model(input_tensor)
+            output_tensor = self.model(input_tensor)
 
-        # モデルの出力が [-1, 1] の場合、[0, 1] に変換
-        # もしGeneratorの最終層がSigmoidなら不要ですが、Tanhなら必要です
-        if cp.get('model_output_range') == "minus1_to_1":
+        if self.model.opts.model_output_range == "minus1_to_1":
             output_tensor = (output_tensor + 1.0) / 2.0
         
-        # 出力テンソルを画像に変換し、パディングをトリミング
-        output_image_np = (output_tensor.squeeze(0).cpu().numpy().transpose(1, 2, 0)) # まだ0-1のfloat
-        
-        # パディング部分をトリミング
-        # p_left, p_top, p_right, p_bottom = padding_coords
-        
-        # output_image_np は HWC (Height, Width, Channels)
-        # トリミング範囲: [top:bottom, left:right]
-        # trimmed_output_np = output_image_np[p_top:original_height + p_top, p_left:original_width + p_left, :]
-        trimmed_output_np = output_image_np
-        
-        # 0-1 から 0-255 に変換し、UINT8型に
-        trimmed_output_np = (trimmed_output_np * 255).astype(np.uint8)
+        output_image_np = (output_tensor.squeeze(0).cpu().numpy().transpose(1, 2, 0)) # 0-1 range, HWC format
+        output_np = (output_image_np * 255).astype(np.uint8)
+        output_image_bgr = cv2.cvtColor(output_np, cv2.COLOR_RGB2BGR)
 
-        output_image_bgr = cv2.cvtColor(trimmed_output_np, cv2.COLOR_RGB2BGR)
+        return output_image_bgr
 
-        cv2.imwrite(str(output_dir / f"{img_path.stem}_enhanced.png"), output_image_bgr)
+
+def apply_model_to_images(model_path: Path, input_dir: Path, output_dir: Path, image_size: tuple[int, int] | None = None):
+    """Apply the pre-trained model to all images in the input directory and save the enhanced images to the output directory."""
+
+    applyer = ModelApplyer(model_path)
+
+    if not input_dir.exists():
+        raise RuntimeError(f"Input directory does not exist: {input_dir}")
     
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logging.info(f"Applying model {model_path} to images in {input_dir} ...")
+
+    for img_path in tqdm([f for f in sorted(input_dir.glob("*.png")) if f.is_file()], desc="Processing images"):
+
+        input_image_bgr = cv2.imread(str(img_path))
+        if input_image_bgr is None:
+            logging.warning(f"Failed to load {img_path}")
+            continue
+        if image_size:
+            input_image_bgr = cv2.resize(input_image_bgr, image_size)
+        
+        output_image_bgr = applyer.apply(input_image_bgr)
+        
+        cv2.imwrite(str(output_dir / f"{img_path.stem}_e.png"), output_image_bgr)
+
     logging.info(f"\n--- Model application completed ---")
     logging.info(f"Generated {len(os.listdir(output_dir))} images")
 
@@ -113,10 +97,9 @@ if __name__ == "__main__":
     parser.add_argument("-imgh", "--image_height", type=int, help="Input/output image height (default: same as model input height).")
     
     args = parser.parse_args()
-    apply_model(
+    apply_model_to_images(
         Path(args.model_path),
         Path(args.input_dir),
         Path(args.output_dir),
-        int(args.image_width) if args.image_width else None,
-        int(args.image_height) if args.image_height else None
+        (args.image_width, args.image_height) if args.image_height and args.image_width else None
     )
