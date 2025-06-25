@@ -175,6 +175,11 @@ def train_model(*,
     logging.info(f"Optimizer: {optimizer}")
     logging.info(f"Scheduler: {scheduler}")
 
+    num_train_samples = len(train_dataset)
+    sample_weights = torch.ones(num_train_samples, dtype=torch.float32)
+
+    sampler = WeightedRandomSampler(sample_weights, # type: ignore
+                                    num_samples=num_train_samples, replacement=True)
     train_loader = DataLoader(train_dataset, batch_size=opts.batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=opts.batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
