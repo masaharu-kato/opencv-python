@@ -249,7 +249,7 @@ def train_model(*,
         avg_lpips_loss = np.mean(lpips_losses)
         avg_total_loss = np.mean(total_losses)
         
-        logging.info(f"Epoch [{epoch+1:4d}/{opts.epochs:4d}] Average Train Loss: L1={avg_l1_loss:.4f}, LPIPS={avg_lpips_loss:.4f}, Total={avg_total_loss:.4f}")
+        # logging.info(f"Epoch [{epoch+1:4d}/{opts.epochs:4d}] Average Train Loss: L1={avg_l1_loss:.4f}, LPIPS={avg_lpips_loss:.4f}, Total={avg_total_loss:.4f}")
 
         writer.add_scalar('Loss/Train/L1', avg_l1_loss, epoch)
         writer.add_scalar('Loss/Train/LPIPS', avg_lpips_loss, epoch)
