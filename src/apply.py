@@ -12,7 +12,7 @@ from tqdm import tqdm
 from models.unet import UNet
 
 # --- メインの推論関数 ---
-def apply_model(model_path: Path, input_dir: Path, output_dir: Path):
+def apply_model(model_path: Path, input_dir: Path, output_dir: Path, image_width: int | None = None, image_height: int | None = None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info(f"Device: {device}")
     
@@ -20,15 +20,19 @@ def apply_model(model_path: Path, input_dir: Path, output_dir: Path):
         raise RuntimeError(f"Model file not found: {model_path}")
     
     try:
-        model, cp = UNet.load(model_path, device)
+        model, cp = UNet.load(model_path, device, {})
+        model.load_state_dict(model.state_dict())
 
     except Exception as e:
         raise RuntimeError(f"An error has occured while model loading: {e}") from e
-        
+    
+    image_width = image_width or cp['image_width']
+    image_height = image_height or cp['image_height']
 
     model.eval() # Evaluation mode
 
-    output_dir.mkdir(exist_ok=True)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # transform = transforms.Compose([
     #     transforms.Resize((image_height, image_width)),
@@ -64,7 +68,7 @@ def apply_model(model_path: Path, input_dir: Path, output_dir: Path):
         # --- ここからパディング処理の追加 ---
         # original_width, original_height = input_image_pil.size
         # padded_input_pil, padding_coords = pad_to_multiple(input_image_pil, model_multiple, fill_value=(0,0,0))
-        padded_input_pil = input_image_pil.resize(cp['in_size'])
+        padded_input_pil = input_image_pil.resize((image_width, image_height))
         
         # Convert to a tensor
         input_tensor = transforms.ToTensor()(padded_input_pil).unsqueeze(0).to(device)
@@ -102,12 +106,17 @@ def apply_model(model_path: Path, input_dir: Path, output_dir: Path):
 # --- コマンドライン引数パーサー ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="学習済みモデルを画像に適用し、画質改善を行うスクリプト。")
-    parser.add_argument("model_path", type=str,
-                        help="ロードする学習済みモデル (.pth) ファイルのパス。")
-    parser.add_argument("input_dir", type=str,
-                        help="モデルを適用する入力画像が保存されているディレクトリのパス。")
-    parser.add_argument("output_dir", type=str,
-                        help="画質改善された画像を保存するディレクトリのパス。")
+    parser.add_argument("model_path", type=str, help="Model file (*.pth) to load.")
+    parser.add_argument("input_dir", type=str, help="Input directory containing images to enhance.")
+    parser.add_argument("output_dir", type=str, help="Output directory to save enhanced images.")
+    parser.add_argument("-imgw", "--image_width", type=int, help="Input/output image width (default: same as model input width).")
+    parser.add_argument("-imgh", "--image_height", type=int, help="Input/output image height (default: same as model input height).")
     
     args = parser.parse_args()
-    apply_model(Path(args.model_path), Path(args.input_dir), Path(args.output_dir))
+    apply_model(
+        Path(args.model_path),
+        Path(args.input_dir),
+        Path(args.output_dir),
+        int(args.image_width) if args.image_width else None,
+        int(args.image_height) if args.image_height else None
+    )
