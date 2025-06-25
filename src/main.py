@@ -20,7 +20,7 @@ from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from datasets.dataset import DatasetOptions, ImagePairDataset
 from datasets.path_pair_groups import PathPairGroups
 from losses.loss import LPIPS_MODEL, LPIPS, MaskedL1, SSIM
-from models.unet import AttentionMethods, ModelOptions, UNet
+from models.unet import AttentionMethods, ModelOptions, NormalizationMethods, UNet
 from utils.option_utils import make_dataclass_from_args, make_dataclass_from_cp_args
 
 PATH_LOGGING = Path("log")
@@ -36,7 +36,7 @@ class TrainOptions:
     batch_size: int
     ga_steps: int # gradient accumulation steps
     lp_weight: float
-    lp_model: LPIPS_MODEL 
+    lp_model: LPIPS_MODEL = 'vgg'
 
 def train_model(*,
     model_path: Path | str | None = None,
@@ -376,6 +376,8 @@ if __name__ == "__main__":
     parser.add_argument("-nw", "--num_workers", type=int, help="データローダーが使用するワーカースレッド数。")
     parser.add_argument("-ft", "--features", type=str, help="UNetの各ステージのチャネル数をカンマ区切りで指定 (例: '64,128,256,512')。")
     parser.add_argument("-at", "--attention_method", choices=list(AttentionMethods.__args__), help="Attention methods to use")
+    parser.add_argument("-nm", "--norm_method", choices=list(NormalizationMethods.__args__), help="Normalization method to use")
+    parser.add_argument("-gn", "--gn_num_groups", type=int, help="Number of groups for Group Normalization (if used).")
     parser.add_argument("-v", "--verbose", action="store_true", help="show train and progress message")
     parser.add_argument("-nop", "--no_progress", action="store_true", help="hide progress bar")
     parser.add_argument("-ro", "--reset_optimizer", action="store_true", help="Reset optimizer state (ignore checkpoint)")

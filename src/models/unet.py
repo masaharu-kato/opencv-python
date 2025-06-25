@@ -18,6 +18,11 @@ AttentionMethods = Literal[
     'CA'        # Coordinate Attention
 ]
 
+NormalizationMethods = Literal[
+    'BN',  # Batch Normalization
+    'GN',  # Group Normalization
+]
+
 ModelOutputRange = Literal['0_to_1', 'minus1_to_1']
 
 @dataclass
@@ -26,24 +31,36 @@ class ModelOptions:
     input_height: int
     features: list[int]
     attention_method: AttentionMethods
+    norm_method: NormalizationMethods = 'BN'
+    gn_num_groups: int = 32 # Num of groups for Group Normalization
     model_output_range: ModelOutputRange = '0_to_1'
 
+    @property
     def input_size(self):
         return (self.input_height, self.input_width)
 
 
 # --- Residual Block with optional attention method ---
 class ResBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, attention_method: AttentionMethods):
+    def __init__(self, in_channels: int, out_channels: int, attention_method: AttentionMethods, norm_method: NormalizationMethods, gn_num_groups: int):
         super(ResBlock, self).__init__()
         
          # Set padding_mode to 'reflect' to avoid reflection padding issues
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False, padding_mode='reflect')
-        self.bn1 = nn.BatchNorm2d(out_channels)
         self.relu1 = nn.ReLU(inplace=True)
 
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False, padding_mode='reflect')
-        self.bn2 = nn.BatchNorm2d(out_channels)
+
+        if norm_method == 'BN':
+            self.norm1 = nn.BatchNorm2d(out_channels)
+            self.norm2 = nn.BatchNorm2d(out_channels)
+        elif norm_method == 'GN':
+            if out_channels % gn_num_groups != 0:
+                raise ValueError(f'out_channels {out_channels} must be divisible by gn_num_groups {gn_num_groups}.')
+            self.norm1 = nn.GroupNorm(gn_num_groups, out_channels)
+            self.norm2 = nn.GroupNorm(gn_num_groups, out_channels)
+        else:
+            raise ValueError(f'Normalization method {norm_method} is not supported.')
 
         if attention_method == 'CBAM':
             self.attention_module = CBAM(out_channels)
@@ -71,11 +88,11 @@ class ResBlock(nn.Module):
         identity = self.shortcut(x)
         
         out = self.conv1(x)
-        out = self.bn1(out)
+        out = self.norm1(out)
         out = self.relu1(out)
         
         out = self.conv2(out)
-        out = self.bn2(out)
+        out = self.norm2(out)
         
         out = self.attention_module(out) # Apply chosen attention module
         
@@ -101,22 +118,32 @@ class UNet(nn.Module):
 
         current_in_channels = self.input_channels
         for feature in self.opts.features:
-            self.downs.append(ResBlock(current_in_channels, feature, self.opts.attention_method))
+            self.downs.append(ResBlock(current_in_channels, feature, self.opts.attention_method, self.opts.norm_method, self.opts.gn_num_groups))
             current_in_channels = feature
 
-        self.bottleneck = ResBlock(self.opts.features[-1], self.opts.features[-1] * 2, self.opts.attention_method)
+        self.bottleneck = ResBlock(self.opts.features[-1], self.opts.features[-1] * 2, self.opts.attention_method, self.opts.norm_method, self.opts.gn_num_groups)
 
         for i in range(len(self.opts.features) - 1, -1, -1):
             feature = self.opts.features[i]
+
+            if opts.norm_method == 'BN':
+                norm_layer = nn.BatchNorm2d(feature)
+            elif opts.norm_method == 'GN':
+                if feature % opts.gn_num_groups != 0:
+                    raise ValueError(f'out_channels {self.output_channels} must be divisible by gn_num_groups {opts.gn_num_groups}.')
+                norm_layer = nn.GroupNorm(opts.gn_num_groups, feature)
+            else:
+                raise ValueError(f'Normalization method {opts.norm_method} is not supported.')
+
             self.ups.append(
                 nn.Sequential(
                     nn.Upsample(scale_factor=2, mode='nearest'), # 最近傍補間
                     nn.Conv2d(feature * 2, feature, kernel_size=3, padding=1, bias=False, padding_mode='reflect'),
-                    nn.BatchNorm2d(feature),
+                    norm_layer,
                     nn.ReLU(inplace=True)
                 )
             )
-            self.ups.append(ResBlock(feature * 2, feature, self.opts.attention_method)) 
+            self.ups.append(ResBlock(feature * 2, feature, self.opts.attention_method, self.opts.norm_method, self.opts.gn_num_groups)) 
 
         self.final_conv = nn.Sequential(
             # padding_mode='reflect' is not needed here as the final conv is 1x1
