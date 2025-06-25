@@ -225,8 +225,15 @@ def train_model(*,
 
                 # Calculate loss
                 l1_loss = calc_l1(output_tensor, clean_tensor, mask_tensor)
-                lpips_loss = calc_lpips(output_tensor, clean_tensor)
-                total_loss = l1_loss + opts.lp_weight * lpips_loss
+                l1_losses.append(l1_loss.item())
+                total_loss = l1_loss
+
+                if opts.lp_weight:
+                    lpips_loss = calc_lpips(output_tensor, clean_tensor)
+                    lpips_losses.append(lpips_loss.item())
+                    total_loss += opts.lp_weight * lpips_loss
+
+                total_losses.append(total_loss.item())
 
             # Scale the loss for gradient accumulation
             scaled_loss = total_loss / opts.ga_steps
@@ -237,10 +244,6 @@ def train_model(*,
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad() # Clear gradients after step
-
-            l1_losses.append(l1_loss.item())
-            lpips_losses.append(lpips_loss.item())
-            total_losses.append(total_loss.item())
 
         avg_l1_loss = np.mean(l1_losses)
         avg_lpips_loss = np.mean(lpips_losses)
@@ -277,13 +280,17 @@ def train_model(*,
 
                     # Calculate loss
                     l1_loss = calc_l1(output_tensor, clean_tensor, mask_tensor)
-                    lpips_loss = calc_lpips(output_tensor, clean_tensor)
-                    total_loss = l1_loss + opts.lp_weight * lpips_loss
-                    ssim = calc_ssim(output_tensor, clean_tensor)
-
                     l1_losses.append(l1_loss.item())
-                    lpips_losses.append(lpips_loss.item())
+                    total_loss = l1_loss
+
+                    if opts.lp_weight:
+                        lpips_loss = calc_lpips(output_tensor, clean_tensor)
+                        lpips_losses.append(lpips_loss.item())
+                        total_loss += opts.lp_weight * lpips_loss
+
                     total_losses.append(total_loss.item())
+
+                    ssim = calc_ssim(output_tensor, clean_tensor)
                     ssims.append(ssim.item())
 
                 # if batch_idx < 4:
@@ -301,10 +308,10 @@ def train_model(*,
 
         # Save model if Total Loss is improved
         f_best_improved = False
-        if avg_total_loss < best_avg_total_loss:
+        if not np.isnan(avg_total_loss) and avg_total_loss < best_avg_total_loss:
             best_avg_total_loss = avg_total_loss
             f_best_improved = True
-        if avg_ssim > best_avg_ssim:
+        if not np.isnan(avg_ssim) and avg_ssim > best_avg_ssim:
             best_avg_ssim = avg_ssim
             f_best_improved = True
 
