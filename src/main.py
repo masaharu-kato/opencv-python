@@ -38,16 +38,12 @@ class TrainOptions:
     lp_weight: float
     lp_model: LPIPS_MODEL 
 
-@dataclass
-class RuntimeOptions:
-    num_workers: int
-    verbose: bool
-    no_progress: bool
-
-
 def train_model(*,
     model_path: Path | str | None = None,
     model_dir: Path | str | None = None,
+    num_workers: int | None = None,
+    verbose: bool = False,
+    no_progress: bool = False,
     reset_optimizer: bool = False,
     reset_scheduler: bool = False,
     **args
@@ -93,8 +89,6 @@ def train_model(*,
     writer = torch.utils.tensorboard.SummaryWriter(log_dir)
     logging.info(f"TensorBoard log directory: {log_dir}")
 
-    ropts = make_dataclass_from_cp_args(RuntimeOptions, {}, args)
-
     logging.info("#### Starting training script ####")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -104,6 +98,9 @@ def train_model(*,
     logging.info(f"model save directory: {model_save_dir}")
     logging.info(f"args: {args}")
     torch.backends.cudnn.benchmark = True
+
+
+    num_workers = num_workers if num_workers is not None else (os.cpu_count() or 2) - 1
 
 
     # --------------------------------------------------
@@ -156,9 +153,9 @@ def train_model(*,
             return
         
         dataset_opts = make_dataclass_from_args(DatasetOptions,  args)
-        train_dataset = ImagePairDataset(PathGroups.from_dump(cp['dataset']['train_dataset_path_groups']), dataset_opts, model.opts)
-        inactive_train_dataset = ImagePairDataset(PathGroups.from_dump(cp['dataset']['inactive_train_dataset_path_groups']), dataset_opts, model.opts)
-        val_dataset = ImagePairDataset(PathGroups.from_dump(cp['dataset']['val_dataset_path_groups']), dataset_opts, model.opts)
+        train_dataset = ImagePairDataset(PathPairGroups.from_dump(cp['dataset']['train_dataset_path_groups']), dataset_opts, model.opts)
+        inactive_train_dataset = ImagePairDataset(PathPairGroups.from_dump(cp['dataset']['inactive_train_dataset_path_groups']), dataset_opts, model.opts)
+        val_dataset = ImagePairDataset(PathPairGroups.from_dump(cp['dataset']['val_dataset_path_groups']), dataset_opts, model.opts)
         
     optimizer = pytorch_optimizer.RAdam(model.parameters(), lr=opts.learning_rate)
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=1, eta_min=1e-6)
@@ -181,9 +178,8 @@ def train_model(*,
     logging.info(f"Optimizer: {optimizer}")
     logging.info(f"Scheduler: {scheduler}")
 
-    sampler = WeightedRandomSampler(sample_weights, num_samples=num_train_samples, replacement=True) # type: ignore
-    train_loader = DataLoader(train_dataset, batch_size=opts.batch_size, sampler=sampler, num_workers=ropts.num_workers, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=opts.batch_size, shuffle=False, num_workers=ropts.num_workers, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=opts.batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=opts.batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
     # ----------------------------------------
     calc_l1 = MaskedL1()
@@ -214,7 +210,7 @@ def train_model(*,
 
         optimizer.zero_grad() 
 
-        for batch_idx, (input_tensor, clean_tensor, mask_tensor, indexes) in enumerate(tqdm(train_loader, disable=ropts.no_progress, desc=f"Epoch {epoch+1} (Train)")):
+        for batch_idx, (input_tensor, clean_tensor, mask_tensor, indexes) in enumerate(tqdm(train_loader, disable=no_progress, desc=f"Epoch {epoch+1} (Train)")):
             input_tensor: Tensor = input_tensor.to(device)
             clean_tensor: Tensor = clean_tensor.to(device)
             mask_tensor: Tensor = mask_tensor.to(device)
@@ -269,7 +265,7 @@ def train_model(*,
         ssims: list[float] = []
 
         with torch.no_grad():
-            for batch_idx, (input_tensor, clean_tensor, mask_tensor, _) in enumerate(tqdm(val_loader, disable=ropts.no_progress, desc=f"Epoch {epoch+1} (Val)")):
+            for batch_idx, (input_tensor, clean_tensor, mask_tensor, _) in enumerate(tqdm(val_loader, disable=no_progress, desc=f"Epoch {epoch+1} (Val)")):
                 input_tensor: Tensor = input_tensor.to(device)
                 clean_tensor: Tensor = clean_tensor.to(device)
                 mask_tensor: Tensor = mask_tensor.to(device)
@@ -373,7 +369,7 @@ if __name__ == "__main__":
     parser.add_argument("-lp", "--lp_weight", type=float, help="LPIPS weight")
     parser.add_argument("-lpm", "--lp_model", type=float, choices=list(LPIPS_MODEL.__args__), help="LPIPS Model")
     parser.add_argument("-ts", "--train_split", type=float, help="学習データセットの割合。残りは検証データセット。")
-    parser.add_argument("-nw", "--num_workers", type=int, default=((os.cpu_count() or 2) - 1), help="データローダーが使用するワーカースレッド数。")
+    parser.add_argument("-nw", "--num_workers", type=int, help="データローダーが使用するワーカースレッド数。")
     parser.add_argument("-ft", "--features", type=str, help="UNetの各ステージのチャネル数をカンマ区切りで指定 (例: '64,128,256,512')。")
     parser.add_argument("-at", "--attention_method", choices=list(AttentionMethods.__args__), help="Attention methods to use")
     parser.add_argument("-v", "--verbose", action="store_true", help="show train and progress message")
