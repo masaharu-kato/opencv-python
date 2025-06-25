@@ -3,7 +3,7 @@ import logging
 import os
 import random
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 import numpy as np
 import pytorch_optimizer
@@ -133,10 +133,8 @@ def train_model(*,
             logging.error("No dataset files specified.")
             return
         
-        full_dataset = ImagePairDataset(PathPairGroups.from_dir(Path(dataset_dir)), dataset_opts, model.opts)
-        full_train_dataset, val_dataset = full_dataset.random_split(opts.train_split)
-        train_dataset, inactive_train_dataset = full_train_dataset.split(opts.active_train_split)
-
+        full_dataset_paths = PathPairGroups.from_dir(Path(dataset_dir))
+        full_train_paths, val_paths = full_dataset_paths.random_split(opts.train_split)
 
     # --------------------------------------------------
     #   Load model from checkpoint
@@ -145,15 +143,19 @@ def train_model(*,
         model, cp = UNet.load(model_path, device, args)
         opts = make_dataclass_from_cp_args(TrainOptions, cp.get('train', None), args)
 
-        if 'dataset' not in cp or any(key not in cp['dataset'] for key in ['train_dataset_path_groups', 'inactive_train_dataset_path_groups', 'val_dataset_path_groups']):
+        if 'dataset' not in cp or any(key not in cp['dataset'] for key in ['full_train_paths', 'val_paths']):
             logging.error("Checkpoint does not contain dataset information.")
             return
         
         dataset_opts = make_dataclass_from_args(DatasetOptions,  args)
-        train_dataset = ImagePairDataset(PathPairGroups.from_dump(cp['dataset']['train_dataset_path_groups']), dataset_opts, model.opts)
-        inactive_train_dataset = ImagePairDataset(PathPairGroups.from_dump(cp['dataset']['inactive_train_dataset_path_groups']), dataset_opts, model.opts)
-        val_dataset = ImagePairDataset(PathPairGroups.from_dump(cp['dataset']['val_dataset_path_groups']), dataset_opts, model.opts)
         
+        full_train_paths = PathPairGroups.from_dump(cp['dataset']['full_train_paths'])
+        val_paths = PathPairGroups.from_dump(cp['dataset']['val_paths'])
+    
+    train_paths, _ = full_train_paths.split(opts.active_train_split)
+    train_dataset = ImagePairDataset(train_paths, dataset_opts, model.opts)
+    val_dataset = ImagePairDataset(val_paths, dataset_opts, model.opts)
+
     optimizer = pytorch_optimizer.RAdam(model.parameters(), lr=opts.learning_rate)
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=1, eta_min=1e-6)
 
@@ -333,12 +335,11 @@ def train_model(*,
             model_save_dir.mkdir(parents=True, exist_ok=True)
             model.save(str(model_save_dir / f"model_loss_{avg_total_loss:.2f}.pth"), 
                 # in_size, features, attention_methods are saved in model.save()
-                train=opts,
+                train=asdict(opts),
                 dataset={
-                    'opts': dataset_opts,
-                    'train_dataset_path_groups': train_dataset.ppair_groups.dump(),
-                    'inactive_train_dataset_path_groups': inactive_train_dataset.ppair_groups.dump(),
-                    'val_dataset_path_groups': val_dataset.ppair_groups.dump(),
+                    'opts': asdict(dataset_opts),
+                    'full_train_paths': full_train_paths.dump(),
+                    'val_paths': val_paths.dump(),
                 },
                 epoch=epoch,
                 optimizer=optimizer.state_dict(),

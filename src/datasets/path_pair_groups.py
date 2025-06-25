@@ -87,11 +87,37 @@ class PathPairGroups:
         random.shuffle(shuffled_groups)
         return PathPairGroups(shuffled_groups)
     
-    def split(self, split_index: int) -> tuple['PathPairGroups', 'PathPairGroups']:
+    def split_by_index(self, split_index: int) -> tuple['PathPairGroups', 'PathPairGroups']:
         """Splits the PathGroups into two groups at the given index."""
         if split_index < 0 or split_index > len(self.ppair_groups):
             raise ValueError("Split index out of range.")
         return PathPairGroups(self.ppair_groups[:split_index]), PathPairGroups(self.ppair_groups[split_index:])
+    
+    def split(self, ratio: float) -> tuple['PathPairGroups', 'PathPairGroups']:
+        """Splits into two datasets baased on the image groups"""
+        if len(self.ppair_groups) == 0:
+            raise ValueError("Empty dataset, cannot split.")
+        if ratio < 0 or ratio > 1:
+            raise ValueError("Ratio must be between 0 and 1.")
+        if len(self.ppair_groups) == 1:
+            if ratio == 0:
+                return PathPairGroups(self.ppair_groups), PathPairGroups()  # Return the original dataset and an empty one
+            elif ratio == 1:
+                return PathPairGroups(), PathPairGroups(self.ppair_groups)  # Return an empty dataset and the original one
+            raise ValueError("Cannot split a single group dataset without 0 or 1 ratio.")
+        
+        split_index = min(max(1, int(len(self.ppair_groups) * ratio)), len(self.ppair_groups) - 1)  # Ensure at least one group in each split
+        return self.split_by_index(split_index)
+    
+    def random_split(self, ratio: float) -> tuple['PathPairGroups', 'PathPairGroups']:
+        """Randomly splits the dataset into two datasets based on the given ratio."""
+        shuffled = self.copy_shuffled()  # Shuffle the groups before splitting
+        return shuffled.split(ratio)
+    
+    def combined(self, other: 'PathPairGroups') -> 'PathPairGroups':
+        """Combines this PathPairGroups with another one."""
+        combined_groups = self.ppair_groups + other.ppair_groups
+        return PathPairGroups(combined_groups)
     
     def dump(self) -> list[list[dict]]:
         """Returns a list of lists of dictionaries representing the path pairs."""
