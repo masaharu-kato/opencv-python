@@ -386,4 +386,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    train_model(**args.__dict__)
+    try:
+        train_model(**args.__dict__)
+    except KeyboardInterrupt:
+        logging.info("Training interrupted by user.")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
